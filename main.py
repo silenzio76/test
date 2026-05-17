@@ -21,7 +21,15 @@ from __future__ import annotations
 # ── Gestione dipendenze ────────────────────────────────────────────────────────
 # DEVE restare prima di qualsiasi import esterno (pandas, matplotlib, PySide6…).
 # dependency_manager.py usa solo librerie standard di Python.
-from dependency_manager import ensure_dependencies_before_startup, get_python_executable
+from dependency_manager import (
+    ensure_dependencies_before_startup,
+    get_python_executable,
+    require_optional,
+    require_optional_group,
+    require_provider,
+    open_optional_manager,
+    is_installed,
+)
 import sys
 
 try:
@@ -46,20 +54,23 @@ import sqlite3
 import urllib.request
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, cast
+import importlib
 import xml.etree.ElementTree as ET
 
 # ── Import di terze parti ──────────────────────────────────────────────────────
 import numpy as np
 import pandas as pd
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 import matplotlib
 matplotlib.use("Agg")          # renderer non-interattivo, thread-safe con Qt
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.patches import Circle
 
-from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QRegularExpression, QThread, Signal
+from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QPersistentModelIndex, QRegularExpression, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -106,19 +117,19 @@ class PandasTableModel(QAbstractTableModel):
         super().__init__()
         self._df = pd.DataFrame() if dataframe is None else dataframe.copy()
 
-    def rowCount(self, parent=QModelIndex()) -> int:
+    def rowCount(self, parent: QModelIndex | QPersistentModelIndex = QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._df)
 
-    def columnCount(self, parent=QModelIndex()) -> int:
+    def columnCount(self, parent: QModelIndex | QPersistentModelIndex = QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._df.columns)
 
-    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+    def data(self, index, role: int = Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or role != Qt.ItemDataRole.DisplayRole:
             return None
         value = self._df.iat[index.row(), index.column()]
         return "" if pd.isna(value) else str(value)
 
-    def headerData(self, section: int, orientation, role=Qt.ItemDataRole.DisplayRole):
+    def headerData(self, section: int, orientation, role: int = Qt.ItemDataRole.DisplayRole):
         if role != Qt.ItemDataRole.DisplayRole:
             return None
         if orientation == Qt.Orientation.Horizontal:
@@ -374,7 +385,7 @@ class ETLEngine:
 
     @staticmethod
     def drop_duplicates(df: pd.DataFrame, subset: Optional[List[str]] = None,
-                        keep: str = "first") -> pd.DataFrame:
+                        keep: Literal["first", "last", False] = "first") -> pd.DataFrame:
         """Rimuove duplicati. keep: 'first' | 'last' | False (rimuove tutti)."""
         return df.drop_duplicates(subset=subset or None, keep=keep,
                                   ignore_index=True)
@@ -720,7 +731,7 @@ class ETLEngine:
 
     @staticmethod
     def merge(df: pd.DataFrame, right: pd.DataFrame,
-              on: List[str], how: str = "inner") -> pd.DataFrame:
+              on: List[str], how: Literal["left", "right", "outer", "inner", "cross"] = "inner") -> pd.DataFrame:
         """Unisce due DataFrame. how: 'inner','left','right','outer','cross'."""
         return pd.merge(df, right, on=on or None, how=how)
 
@@ -732,7 +743,7 @@ class ETLEngine:
 
     @staticmethod
     def pivot(df: pd.DataFrame, index: str, columns: str,
-              values: str, agg_func: str = "mean") -> pd.DataFrame:
+              values: str, agg_func: Any = "mean") -> pd.DataFrame:
         """Crea una tabella pivot."""
         return df.pivot_table(index=index, columns=columns,
                               values=values, aggfunc=agg_func)
@@ -885,7 +896,7 @@ class SQLHighlighter(QSyntaxHighlighter):
                 (
                     QRegularExpression(
                         r"\b" + kw + r"\b",
-                        QRegularExpression.CaseInsensitiveOption,
+                        QRegularExpression.PatternOption.CaseInsensitiveOption,
                     ),
                     kw_fmt,
                 )
@@ -991,6 +1002,7 @@ class MainWindow(QMainWindow):
         self.etl_steps: List[str] = []
         self.sql_theme_dark: bool = True
         self.sql_result_df: pd.DataFrame = pd.DataFrame()
+        self._report_figures: Dict[str, Figure] = {}
 
         # ── Layout radice ─────────────────────────────────────────────────────
         central = QWidget()
@@ -1009,6 +1021,97 @@ class MainWindow(QMainWindow):
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self._set_status("Pronto.")
+        self._build_menu_bar()
+
+    def _build_menu_bar(self) -> None:
+        """Barra menu principale con Strumenti → Gestione dipendenze opzionali."""
+        from PySide6.QtGui import QAction
+        menubar = self.menuBar()
+
+        # Menu Strumenti
+        tools_menu = menubar.addMenu("Strumenti")
+
+        act_dep = QAction("📦  Gestione dipendenze opzionali...", self)
+        act_dep.setToolTip("Installa, aggiorna o verifica le librerie opzionali (driver DB, export, ML)")
+        act_dep.triggered.connect(lambda: open_optional_manager(self))
+        tools_menu.addAction(act_dep)
+
+        tools_menu.addSeparator()
+
+        act_reload = QAction("🔄  Ricarica dipendenze core", self)
+        act_reload.setToolTip("Verifica e reinstalla le librerie core da LIBRARIES.md")
+        act_reload.triggered.connect(self._reload_core_deps)
+        tools_menu.addAction(act_reload)
+
+        act_status = QAction("ℹ  Stato dipendenze", self)
+        act_status.triggered.connect(self._show_dep_status)
+        tools_menu.addAction(act_status)
+
+        # Menu Dati
+        data_menu = menubar.addMenu("Dati")
+        act_etl_reset = QAction("↩  Ripristina dataset originale", self)
+        act_etl_reset.triggered.connect(self._etl_reset)
+        data_menu.addAction(act_etl_reset)
+
+        act_export = QAction("📤  Esporta dati correnti...", self)
+        act_export.triggered.connect(self._etl_export)
+        data_menu.addAction(act_export)
+
+    def _reload_core_deps(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        try:
+            from dependency_manager import ensure_dependencies_before_startup
+            ensure_dependencies_before_startup("LIBRARIES.md", auto_update=True)
+            QMessageBox.information(self, "Dipendenze core",
+                "Verifica completata. Tutte le librerie core sono installate.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Errore dipendenze", str(exc))
+
+    def _show_dep_status(self) -> None:
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
+        from PySide6.QtGui import QFont
+        from dependency_manager import (
+            read_libraries_from_markdown,
+            read_optional_libraries_from_markdown,
+            is_installed, get_python_executable,
+            _load_optional_registry,
+        )
+        dlg = QDialog(self); dlg.setWindowTitle("Stato dipendenze"); dlg.resize(600, 480)
+        layout = QVBoxLayout(dlg)
+        txt = QTextEdit(); txt.setReadOnly(True); txt.setFont(QFont("Courier New", 10))
+        btn = QPushButton("Chiudi"); btn.clicked.connect(dlg.accept)
+        layout.addWidget(txt); layout.addWidget(btn)
+
+        py = get_python_executable()
+        lines = [
+            "STATO DIPENDENZE — HealthReport Studio",
+            "=" * 60,
+            f"Interprete Python : {py}",
+            "",
+            "── CORE LIBRARIES ──",
+        ]
+        try:
+            core = read_libraries_from_markdown("LIBRARIES.md")
+            for lib in core:
+                ok = is_installed(lib, py)
+                lines.append(f"  {'✔' if ok else '✖'}  {lib}")
+        except Exception as exc:
+            lines.append(f"  Errore lettura LIBRARIES.md: {exc}")
+
+        lines += ["", "── LIBRERIE OPZIONALI ──"]
+        reg = _load_optional_registry()
+        try:
+            opt = read_optional_libraries_from_markdown("LIBRARIES_OPTIONAL.md")
+            for pip_name, desc in opt.items():
+                ok = is_installed(pip_name, py)
+                ver = reg.get(pip_name, {}).get("version", "") if ok else ""
+                status = f"✔ {ver}" if ok else "✖ non installata"
+                lines.append(f"  [{status:<18}] {pip_name:<35} {desc[:35]}")
+        except Exception as exc:
+            lines.append(f"  Errore lettura LIBRARIES_OPTIONAL.md: {exc}")
+
+        txt.setPlainText("\n".join(lines))
+        dlg.exec()
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 1 – DATA QUERY
@@ -1022,8 +1125,9 @@ class MainWindow(QMainWindow):
         self.query_subtabs = QTabWidget()
         self.query_subtabs.addTab(self._build_sources_tab(),     "A · Sorgenti Dati")
         self.query_subtabs.addTab(self._build_db_tab(),          "B · Connessioni DB")
-        self.query_subtabs.addTab(self._build_sql_tab(),         "C · Editor SQL")
-        self.query_subtabs.addTab(self._build_etl_tab(),         "D · ETL / Trasformazioni")
+        self.query_subtabs.addTab(self._build_cloud_db_tab(),    "C · Cloud Database")
+        self.query_subtabs.addTab(self._build_sql_tab(),         "D · Editor SQL")
+        self.query_subtabs.addTab(self._build_etl_tab(),         "E · ETL / Trasformazioni")
 
         layout.addWidget(self.query_subtabs)
         return widget
@@ -1164,7 +1268,7 @@ class MainWindow(QMainWindow):
         try:
             df = self._load_source(self.query_sources[row])
             self._set_raw_df(df, label=self.query_sources[row]["value"])
-            self.query_subtabs.setCurrentIndex(3)   # vai a ETL
+            self.query_subtabs.setCurrentIndex(4)   # vai a ETL
         except Exception as exc:
             QMessageBox.critical(self, "Errore di caricamento", str(exc))
 
@@ -1187,155 +1291,1137 @@ class MainWindow(QMainWindow):
             f"  Fonte   : {name}",
         )
 
-    # ── B · Connessioni DB ────────────────────────────────────────────────────
 
-    _DB_DEFAULTS: Dict[str, tuple] = {
-        "MySQL":              ("3306",  "TCP/IP — driver mysqlclient / PyMySQL"),
-        "PostgreSQL":         ("5432",  "TCP/IP — driver psycopg2"),
-        "MSSQL / SQL Server": ("1433",  "TCP/IP o Named Pipes — driver pyodbc"),
-        "Oracle":             ("1521",  "TCP/IP — driver cx_Oracle / python-oracledb"),
-        "Access (ODBC)":      ("N/A",   "File locale .accdb/.mdb — driver ODBC/ACE"),
-        "MongoDB":            ("27017", "URI MongoDB"),
-        "SQLite":             ("N/A",   "File locale .db / .sqlite"),
+    # ======================================================================
+    # B · CONNESSIONI DB LOCALI / ON-PREMISE (SQLAlchemy)
+    # ======================================================================
+
+    _active_connections: dict = {}
+
+    _DB_DEFAULTS: dict = {
+        "SQLite": {
+            "port": "", "driver": "sqlite",
+            "pkg": "sqlalchemy",
+            "url": "sqlite:///{file}",
+            "hint": "File locale. Non serve host/porta/utente.",
+            "fields": ["file"],
+        },
+        "PostgreSQL": {
+            "port": "5432", "driver": "postgresql+psycopg2",
+            "pkg": "psycopg2-binary",
+            "url": "postgresql+psycopg2://{user}:{password}@{host}:{port}/{database}",
+            "hint": "Driver: psycopg2  ->  pip install psycopg2-binary sqlalchemy",
+            "fields": ["host","port","database","user","password"],
+        },
+        "MySQL / MariaDB": {
+            "port": "3306", "driver": "mysql+pymysql",
+            "pkg": "pymysql",
+            "url": "mysql+pymysql://{user}:{password}@{host}:{port}/{database}",
+            "hint": "Driver: PyMySQL  ->  pip install pymysql sqlalchemy",
+            "fields": ["host","port","database","user","password"],
+        },
+        "MSSQL / SQL Server": {
+            "port": "1433", "driver": "mssql+pyodbc",
+            "pkg": "pyodbc",
+            "url": "mssql+pyodbc://{user}:{password}@{host}:{port}/{database}?driver=ODBC+Driver+17+for+SQL+Server",
+            "hint": "Richiede ODBC Driver 17+  ->  pip install pyodbc sqlalchemy",
+            "fields": ["host","port","database","user","password"],
+        },
+        "Oracle": {
+            "port": "1521", "driver": "oracle+oracledb",
+            "pkg": "oracledb",
+            "url": "oracle+oracledb://{user}:{password}@{host}:{port}/?service_name={database}",
+            "hint": "Driver: python-oracledb  ->  pip install oracledb sqlalchemy",
+            "fields": ["host","port","database","user","password"],
+        },
+        "IBM DB2": {
+            "port": "50000", "driver": "ibm_db_sa",
+            "pkg": "ibm_db ibm_db_sa",
+            "url": "db2+ibm_db://{user}:{password}@{host}:{port}/{database}",
+            "hint": "pip install ibm_db ibm_db_sa sqlalchemy",
+            "fields": ["host","port","database","user","password"],
+        },
+        "DuckDB (file)": {
+            "port": "", "driver": "duckdb",
+            "pkg": "duckdb duckdb-engine",
+            "url": "duckdb:///{file}",
+            "hint": "pip install duckdb duckdb-engine  -- File locale .duckdb",
+            "fields": ["file"],
+        },
+        "Access (ODBC)": {
+            "port": "", "driver": "access+pyodbc",
+            "pkg": "pyodbc",
+            "url": "access+pyodbc:///{file}",
+            "hint": "Richiede ACE OLEDB 64-bit (Windows). pip install pyodbc sqlalchemy",
+            "fields": ["file"],
+        },
+        "Firebird": {
+            "port": "3050", "driver": "firebird+fdb",
+            "pkg": "fdb sqlalchemy",
+            "url": "firebird+fdb://{user}:{password}@{host}:{port}/{database}",
+            "hint": "pip install fdb sqlalchemy",
+            "fields": ["host","port","database","user","password"],
+        },
     }
 
     def _build_db_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
+        inner = QTabWidget()
+        inner.addTab(self._build_db_new_conn_panel(), "Nuova connessione")
+        inner.addTab(self._build_db_saved_panel(),    "Connessioni salvate")
+        inner.addTab(self._build_db_schema_browser(), "Browser schema")
+        layout.addWidget(inner)
+        return widget
 
-        fg = QGroupBox("Nuova Connessione Database")
-        fl = QFormLayout(fg)
-
-        self.db_type  = QComboBox()
+    def _build_db_new_conn_panel(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(8, 8, 8, 8)
+        form_group = QGroupBox("Parametri connessione")
+        fl = QFormLayout(form_group)
+        self.db_type = QComboBox()
         self.db_type.addItems(list(self._DB_DEFAULTS.keys()))
         self.db_type.currentTextChanged.connect(self._db_on_type_changed)
-
-        self.db_method_lbl = QLabel()
-        self.db_method_lbl.setWordWrap(True)
-        self.db_method_lbl.setStyleSheet("color:#888;")
-
-        self.db_host  = QLineEdit(); self.db_host.setPlaceholderText("localhost")
-        self.db_port  = QLineEdit(); self.db_port.setPlaceholderText("3306")
-        self.db_name  = QLineEdit(); self.db_name.setPlaceholderText("nome_database")
-        self.db_user  = QLineEdit(); self.db_user.setPlaceholderText("utente")
-        self.db_pass  = QLineEdit()
-        self.db_pass.setEchoMode(QLineEdit.EchoMode.Password)
-        self.db_pass.setPlaceholderText("password")
-
-        btn_show = QPushButton("Mostra")
-        btn_show.setCheckable(True)
-        btn_show.clicked.connect(
-            lambda chk: self.db_pass.setEchoMode(
-                QLineEdit.EchoMode.Normal if chk else QLineEdit.EchoMode.Password
-            )
-        )
-        pw_row = QHBoxLayout()
-        pw_row.addWidget(self.db_pass)
-        pw_row.addWidget(btn_show)
-        pw_widget = QWidget(); pw_widget.setLayout(pw_row)
-
-        btn_test  = QPushButton("🔌  Test Connessione")
-        btn_save  = QPushButton("💾  Salva Connessione")
-        btn_sqlite= QPushButton("📂  Carica SQLite direttamente…")
-        btn_test.clicked.connect(self._db_test)
-        btn_save.clicked.connect(self._db_save)
+        self.db_hint_lbl = QLabel()
+        self.db_hint_lbl.setWordWrap(True)
+        self.db_hint_lbl.setStyleSheet("color:#777;font-style:italic;font-size:11px;")
+        self.db_name_edit = QLineEdit(); self.db_name_edit.setPlaceholderText("Nome connessione (alias)")
+        self.db_host_edit = QLineEdit(); self.db_host_edit.setPlaceholderText("localhost")
+        self.db_port_edit = QLineEdit(); self.db_port_edit.setPlaceholderText("porta")
+        self.db_db_edit   = QLineEdit(); self.db_db_edit.setPlaceholderText("nome database")
+        self.db_user_edit = QLineEdit(); self.db_user_edit.setPlaceholderText("utente")
+        self.db_file_edit = QLineEdit(); self.db_file_edit.setPlaceholderText("percorso file...")
+        btn_browse_file = QPushButton("..."); btn_browse_file.setMaximumWidth(30)
+        btn_browse_file.clicked.connect(self._db_browse_file)
+        file_row = QHBoxLayout(); file_row.addWidget(self.db_file_edit); file_row.addWidget(btn_browse_file)
+        self.db_file_widget = QWidget(); self.db_file_widget.setLayout(file_row)
+        self.db_pass_edit = QLineEdit()
+        self.db_pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.db_pass_edit.setPlaceholderText("password")
+        btn_show_pw = QPushButton("mostra"); btn_show_pw.setMaximumWidth(55); btn_show_pw.setCheckable(True)
+        btn_show_pw.clicked.connect(
+            lambda chk: self.db_pass_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if chk else QLineEdit.EchoMode.Password))
+        pw_row = QHBoxLayout(); pw_row.addWidget(self.db_pass_edit); pw_row.addWidget(btn_show_pw)
+        self.db_pw_widget = QWidget(); self.db_pw_widget.setLayout(pw_row)
+        self.db_extra_edit = QLineEdit()
+        self.db_extra_edit.setPlaceholderText("parametri extra URL (es. charset=utf8&timeout=30)")
+        self.db_ssl_check = QCheckBox("SSL/TLS")
+        self.db_pool_spin = QSpinBox(); self.db_pool_spin.setRange(1,20); self.db_pool_spin.setValue(5)
+        self.db_pool_spin.setPrefix("Pool: ")
+        self.db_timeout_spin = QSpinBox(); self.db_timeout_spin.setRange(1,120); self.db_timeout_spin.setValue(30)
+        self.db_timeout_spin.setPrefix("Timeout: "); self.db_timeout_spin.setSuffix("s")
+        fl.addRow("Tipo DBMS:",       self.db_type)
+        fl.addRow("",                 self.db_hint_lbl)
+        fl.addRow("Alias/Nome:",      self.db_name_edit)
+        fl.addRow("Host:",            self.db_host_edit)
+        fl.addRow("Porta:",           self.db_port_edit)
+        fl.addRow("Database:",        self.db_db_edit)
+        fl.addRow("File:",            self.db_file_widget)
+        fl.addRow("Utente:",          self.db_user_edit)
+        fl.addRow("Password:",        self.db_pw_widget)
+        fl.addRow("Extra URL:",       self.db_extra_edit)
+        opts_row = QHBoxLayout()
+        opts_row.addWidget(self.db_ssl_check); opts_row.addWidget(self.db_pool_spin)
+        opts_row.addWidget(self.db_timeout_spin); opts_row.addStretch()
+        fl.addRow("Opzioni:", _wrap(opts_row))
+        btn_test    = QPushButton("Testa connessione")
+        btn_connect = QPushButton("Connetti e salva")
+        btn_sqlite  = QPushButton("Apri SQLite...")
+        btn_url     = QPushButton("Da URL completa...")
+        btn_test.clicked.connect(self._db_test_real)
+        btn_connect.clicked.connect(self._db_connect_and_save)
         btn_sqlite.clicked.connect(self._db_quick_sqlite)
-
-        fl.addRow("Tipo:",       self.db_type)
-        fl.addRow("",            self.db_method_lbl)
-        fl.addRow("Host / File:", self.db_host)
-        fl.addRow("Porta:",       self.db_port)
-        fl.addRow("Database:",    self.db_name)
-        fl.addRow("Utente:",      self.db_user)
-        fl.addRow("Password:",    pw_widget)
-
-        btn_row = QHBoxLayout()
-        btn_row.addWidget(btn_test)
-        btn_row.addWidget(btn_save)
-        btn_row.addStretch()
-        btn_row.addWidget(btn_sqlite)
-        fl.addRow(btn_row)
-
-        self.db_list = QListWidget()
-
-        layout.addWidget(fg)
-        layout.addWidget(QLabel("Connessioni salvate:"))
-        layout.addWidget(self.db_list)
+        btn_url.clicked.connect(self._db_from_url)
+        act_row = QHBoxLayout()
+        act_row.addWidget(btn_test); act_row.addWidget(btn_connect)
+        act_row.addStretch(); act_row.addWidget(btn_sqlite); act_row.addWidget(btn_url)
+        self.db_url_preview = QLabel("URL: --")
+        self.db_url_preview.setStyleSheet("font-family:monospace;font-size:10px;color:#555;background:#f5f5f5;padding:4px;")
+        self.db_url_preview.setWordWrap(True)
+        for w in [self.db_host_edit, self.db_port_edit, self.db_db_edit,
+                  self.db_user_edit, self.db_file_edit, self.db_extra_edit]:
+            w.textChanged.connect(self._db_update_url_preview)
+        self.db_type.currentTextChanged.connect(self._db_update_url_preview)
+        layout.addWidget(form_group)
+        layout.addLayout(act_row)
+        layout.addWidget(QLabel("URL preview:"))
+        layout.addWidget(self.db_url_preview)
         layout.addStretch()
-
         self._db_on_type_changed(self.db_type.currentText())
         return widget
 
-    def _db_on_type_changed(self, db_type: str) -> None:
-        port, method = self._DB_DEFAULTS.get(db_type, ("", ""))
-        self.db_port.setPlaceholderText(port)
-        self.db_port.setEnabled(port not in {"N/A", ""})
-        self.db_method_lbl.setText(method)
-        if db_type in {"Access (ODBC)", "SQLite"}:
-            self.db_host.setPlaceholderText("Percorso file…")
-        else:
-            self.db_host.setPlaceholderText("localhost o IP server")
+    def _build_db_saved_panel(self) -> QWidget:
+        widget = QWidget(); layout = QVBoxLayout(widget); layout.setContentsMargins(8,8,8,8)
+        bar = QHBoxLayout()
+        btn_use    = QPushButton("Usa in SQL Editor"); btn_use.clicked.connect(self._db_use_selected)
+        btn_import = QPushButton("Importa tabella");   btn_import.clicked.connect(self._db_import_table)
+        btn_remove = QPushButton("Rimuovi");           btn_remove.clicked.connect(self._db_remove_conn)
+        btn_test2  = QPushButton("Test");              btn_test2.clicked.connect(self._db_test_selected)
+        bar.addWidget(btn_use); bar.addWidget(btn_import); bar.addStretch()
+        bar.addWidget(btn_test2); bar.addWidget(btn_remove)
+        self.db_saved_list = QListWidget()
+        self.db_saved_list.itemDoubleClicked.connect(self._db_use_selected)
+        qr_group = QGroupBox("Query rapida sulla connessione selezionata")
+        qr_layout = QVBoxLayout(qr_group)
+        self.db_quick_sql = QTextEdit()
+        self.db_quick_sql.setMaximumHeight(75)
+        self.db_quick_sql.setFont(QFont("Courier New", 10))
+        self.db_quick_sql.setPlaceholderText("SELECT * FROM tabella LIMIT 100")
+        btn_run_quick = QPushButton("Esegui"); btn_run_quick.clicked.connect(self._db_run_quick_query)
+        qr_layout.addWidget(self.db_quick_sql); qr_layout.addWidget(btn_run_quick)
+        self.db_quick_result_lbl   = QLabel("--")
+        self.db_quick_result_model = PandasTableModel()
+        self.db_quick_result_table = _make_table_view(self.db_quick_result_model)
+        self.db_quick_result_table.setMaximumHeight(180)
+        layout.addLayout(bar)
+        layout.addWidget(QLabel("Connessioni attive:")); layout.addWidget(self.db_saved_list)
+        layout.addWidget(qr_group)
+        layout.addWidget(self.db_quick_result_lbl); layout.addWidget(self.db_quick_result_table)
+        return widget
 
-    def _db_conn_string(self) -> str:
+    def _build_db_schema_browser(self) -> QWidget:
+        from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem
+        widget = QWidget(); layout = QVBoxLayout(widget); layout.setContentsMargins(8,8,8,8)
+        bar = QHBoxLayout()
+        self.schema_conn_combo = QComboBox(); self.schema_conn_combo.setMinimumWidth(200)
+        btn_browse       = QPushButton("Esplora schema")
+        btn_preview_tbl  = QPushButton("Anteprima tabella")
+        btn_load_tbl     = QPushButton("Carica tabella")
+        btn_browse.clicked.connect(self._db_browse_schema)
+        btn_preview_tbl.clicked.connect(self._db_preview_table)
+        btn_load_tbl.clicked.connect(self._db_load_selected_table)
+        bar.addWidget(QLabel("Connessione:")); bar.addWidget(self.schema_conn_combo)
+        bar.addWidget(btn_browse); bar.addStretch()
+        bar.addWidget(btn_preview_tbl); bar.addWidget(btn_load_tbl)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.schema_tree = QTreeWidget()
+        self.schema_tree.setHeaderLabels(["Oggetto", "Tipo"])
+        self.schema_tree.setMinimumWidth(260)
+        self.schema_detail = QTextEdit()
+        self.schema_detail.setReadOnly(True); self.schema_detail.setFont(QFont("Courier New", 10))
+        self.schema_detail.setPlaceholderText("Seleziona una tabella per i dettagli...")
+        splitter.addWidget(self.schema_tree); splitter.addWidget(self.schema_detail)
+        splitter.setSizes([280, 400])
+        layout.addLayout(bar); layout.addWidget(splitter, stretch=1)
+        return widget
+
+    # -- DB logic (SQLAlchemy) -----------------------------------------------
+
+    def _db_build_url(self) -> str:
         t    = self.db_type.currentText()
-        host = self.db_host.text().strip() or "localhost"
-        port = self.db_port.text().strip()
-        db   = self.db_name.text().strip()
-        user = self.db_user.text().strip()
-        if t == "MySQL":
-            return f"mysql+pymysql://{user}:***@{host}:{port}/{db}"
-        if t == "PostgreSQL":
-            return f"postgresql+psycopg2://{user}:***@{host}:{port}/{db}"
-        if t == "MSSQL / SQL Server":
-            return (
-                f"mssql+pyodbc://{user}:***@{host}:{port}/{db}"
-                "?driver=ODBC+Driver+17+for+SQL+Server"
-            )
-        if t == "Oracle":
-            return f"oracle+oracledb://{user}:***@{host}:{port}/?service_name={db}"
-        if t == "Access (ODBC)":
-            return f"access+pyodbc:///{host}"
-        if t == "MongoDB":
-            return f"mongodb://{user}:***@{host}:{port}/{db}"
-        if t == "SQLite":
-            return f"sqlite:///{host}"
-        return f"{t.lower()}://{host}/{db}"
-
-    def _db_test(self) -> None:
-        cs = self._db_conn_string()
-        QMessageBox.information(
-            self, "Test connessione",
-            f"Connection string generata:\n\n{cs}\n\n"
-            "⚠ Il test reale richiede i driver specifici installati\n"
-            "   e la raggiungibilità del server.",
+        cfg  = self._DB_DEFAULTS.get(t, {})
+        host = self.db_host_edit.text().strip() or "localhost"
+        port = self.db_port_edit.text().strip()
+        db   = self.db_db_edit.text().strip()
+        user = self.db_user_edit.text().strip()
+        pwd  = self.db_pass_edit.text()
+        file_= self.db_file_edit.text().strip()
+        extra= self.db_extra_edit.text().strip()
+        import urllib.parse
+        pwd_enc = urllib.parse.quote_plus(pwd) if pwd else ""
+        url = cfg.get("url","").format(
+            host=host, port=port, database=db,
+            user=user, password=pwd_enc, file=file_,
         )
+        if extra:
+            sep = "&" if "?" in url else "?"
+            url = url + sep + extra
+        return url
 
-    def _db_save(self) -> None:
-        if not self.db_host.text().strip():
-            QMessageBox.warning(self, "Campo mancante", "Inserisci host o percorso file.")
+    def _db_update_url_preview(self, *_) -> None:
+        try:
+            import re
+            url = self._db_build_url()
+            url_d = re.sub(r":[^:@]+@", ":***@", url)
+            self.db_url_preview.setText("URL: " + url_d)
+        except Exception:
+            self.db_url_preview.setText("URL: --")
+
+    def _db_on_type_changed(self, db_type: str) -> None:
+        cfg = self._DB_DEFAULTS.get(db_type, {})
+        fields = cfg.get("fields", [])
+        self.db_hint_lbl.setText(cfg.get("hint",""))
+        self.db_port_edit.setPlaceholderText(cfg.get("port",""))
+        self.db_port_edit.setEnabled("port" in fields)
+        self.db_host_edit.setEnabled("host" in fields)
+        self.db_db_edit.setEnabled("database" in fields)
+        self.db_user_edit.setEnabled("user" in fields)
+        self.db_pw_widget.setEnabled("password" in fields)
+        self.db_file_widget.setEnabled("file" in fields)
+        self._db_update_url_preview()
+
+    def _db_browse_file(self) -> None:
+        t = self.db_type.currentText()
+        if "DuckDB" in t:
+            path, _ = QFileDialog.getOpenFileName(self, "Apri DuckDB", "", "DuckDB (*.duckdb *.db)")
+        else:
+            path, _ = QFileDialog.getOpenFileName(self, "Apri file DB", "",
+                "Database (*.db *.sqlite *.accdb *.mdb *.duckdb)")
+        if path:
+            self.db_file_edit.setText(path)
+
+    def _db_test_real(self) -> None:
+        # Assicura SQLAlchemy installato
+        if not require_optional("sqlalchemy", reason="connessioni database SQLAlchemy"):
             return
-        cs = self._db_conn_string()
-        self.db_connections.append({
-            "type": self.db_type.currentText(),
-            "conn_string": cs,
-        })
-        self.db_list.addItem(f"{self.db_type.currentText()}  —  {cs}")
-        self.sql_conn_combo.addItem(f"{self.db_type.currentText()} — {cs}")
-        QMessageBox.information(self, "Salvata", "Connessione aggiunta all'elenco.")
+        # Assicura il driver specifico
+        t = self.db_type.currentText()
+        provider_map = {
+            "PostgreSQL": "PostgreSQL", "MySQL / MariaDB": "MySQL",
+            "MSSQL / SQL Server": "MSSQL", "Oracle": "Oracle",
+            "DuckDB (file)": "DuckDB", "IBM DB2": "IBM DB2",
+            "Access (ODBC)": "MSSQL", "Firebird": "Firebird",
+        }
+        provider = provider_map.get(t)
+        if provider and not require_provider(provider):
+            return
+        try:
+            import sqlalchemy as sa, re
+            url = self._db_build_url()
+            kw: Dict[str, Any] = {}
+            if t not in {"SQLite","DuckDB (file)","Access (ODBC)"}:
+                kw["connect_args"] = {"connect_timeout": self.db_timeout_spin.value()}
+            engine = sa.create_engine(url, pool_size=1, max_overflow=0, **kw)
+            with engine.connect() as conn:
+                conn.execute(sa.text("SELECT 1"))
+            engine.dispose()
+            url_d = re.sub(r":[^:@]+@", ":***@", url)
+            QMessageBox.information(self, "Test superato",
+                "Connessione riuscita!\n\nURL: " + url_d)
+        except Exception as exc:
+            QMessageBox.critical(self, "Connessione fallita",
+                "Errore: " + str(exc) + "\n\nVerifica host, credenziali e driver installato.")
+
+    def _db_connect_and_save(self) -> None:
+        alias = self.db_name_edit.text().strip()
+        if not alias:
+            QMessageBox.warning(self, "Alias mancante", "Inserisci un nome per la connessione."); return
+        if alias in self._active_connections:
+            r = QMessageBox.question(self, "Sostituire?",
+                "Connessione '" + alias + "' gia' esistente. Sostituire?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if r != QMessageBox.StandardButton.Yes: return
+        # Installa SQLAlchemy e il driver se mancanti
+        if not require_optional("sqlalchemy", reason="connessioni database"):
+            return
+        t = self.db_type.currentText()
+        provider_map = {
+            "PostgreSQL": "PostgreSQL", "MySQL / MariaDB": "MySQL",
+            "MSSQL / SQL Server": "MSSQL", "Oracle": "Oracle",
+            "DuckDB (file)": "DuckDB", "IBM DB2": "IBM DB2",
+            "Access (ODBC)": "MSSQL", "Firebird": "Firebird",
+        }
+        provider = provider_map.get(t)
+        if provider and not require_provider(provider):
+            return
+        try:
+            import sqlalchemy as sa, re
+            url  = self._db_build_url()
+            t    = self.db_type.currentText()
+            pool = self.db_pool_spin.value()
+            tmo  = self.db_timeout_spin.value()
+            kw: Dict[str, Any] = {}
+            if t not in {"SQLite","DuckDB (file)","Access (ODBC)"}:
+                kw["connect_args"] = {"connect_timeout": tmo}
+            engine = sa.create_engine(url, pool_size=pool, max_overflow=5,
+                                       pool_pre_ping=True, **kw)
+            with engine.connect() as conn:
+                conn.execute(sa.text("SELECT 1"))
+            url_masked = re.sub(r":[^:@]+@", ":***@", url)
+            self._active_connections[alias] = {
+                "engine": engine, "type": t,
+                "url": url, "url_masked": url_masked,
+                "pool": pool, "timeout": tmo,
+            }
+            self._db_refresh_connection_lists(alias)
+            QMessageBox.information(self, "Connesso",
+                "Connessione '" + alias + "' stabilita.\n" + url_masked)
+        except ImportError:
+            QMessageBox.warning(self, "SQLAlchemy mancante",
+                "pip install sqlalchemy + driver specifico")
+        except Exception as exc:
+            QMessageBox.critical(self, "Errore connessione", str(exc))
+
+    def _db_from_url(self) -> None:
+        url, ok = QInputDialog.getText(self, "Connetti da URL",
+            "Incolla la URL SQLAlchemy completa:")
+        if not ok or not url.strip(): return
+        alias, ok2 = QInputDialog.getText(self, "Alias", "Nome per questa connessione:")
+        if not ok2 or not alias.strip(): return
+        try:
+            import sqlalchemy as sa, re
+            engine = sa.create_engine(url.strip())
+            with engine.connect() as conn:
+                conn.execute(sa.text("SELECT 1"))
+            url_masked = re.sub(r":[^:@]+@", ":***@", url.strip())
+            self._active_connections[alias.strip()] = {
+                "engine": engine, "type": "Custom URL",
+                "url": url.strip(), "url_masked": url_masked,
+                "pool": 5, "timeout": 30,
+            }
+            self._db_refresh_connection_lists(alias.strip())
+            QMessageBox.information(self, "Connesso", alias + " -> " + url_masked)
+        except Exception as exc:
+            QMessageBox.critical(self, "Errore", str(exc))
+
+    def _db_refresh_connection_lists(self, new_alias: str = "") -> None:
+        self.db_saved_list.clear()
+        for alias, info in self._active_connections.items():
+            self.db_saved_list.addItem("[" + info["type"] + "]  " + alias + "  --  " + info["url_masked"])
+        self.schema_conn_combo.clear()
+        self.schema_conn_combo.addItems(list(self._active_connections.keys()))
+        self.sql_conn_combo.clear()
+        self.sql_conn_combo.addItem("Locale (dataset caricato)")
+        for alias in self._active_connections:
+            self.sql_conn_combo.addItem(alias)
+        if hasattr(self, "cloud_conn_use_combo"):
+            self.cloud_conn_use_combo.clear()
+            self.cloud_conn_use_combo.addItems(list(self._active_connections.keys()))
+
+    def _db_use_selected(self, _item=None) -> None:
+        row = self.db_saved_list.currentRow()
+        if row < 0: return
+        alias = list(self._active_connections.keys())[row]
+        idx = self.sql_conn_combo.findText(alias)
+        if idx >= 0: self.sql_conn_combo.setCurrentIndex(idx)
+        self.query_subtabs.setCurrentIndex(3)
+
+    def _db_test_selected(self) -> None:
+        row = self.db_saved_list.currentRow()
+        if row < 0: return
+        alias = list(self._active_connections.keys())[row]
+        try:
+            import sqlalchemy as sa
+            with self._active_connections[alias]["engine"].connect() as conn:
+                conn.execute(sa.text("SELECT 1"))
+            QMessageBox.information(self, "OK", "Connessione '" + alias + "' attiva.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Errore", str(exc))
+
+    def _db_remove_conn(self) -> None:
+        row = self.db_saved_list.currentRow()
+        if row < 0: return
+        alias = list(self._active_connections.keys())[row]
+        if QMessageBox.question(self, "Rimuovi", "Chiudere connessione '" + alias + "'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) != QMessageBox.StandardButton.Yes: return
+        try: self._active_connections[alias]["engine"].dispose()
+        except Exception: pass
+        del self._active_connections[alias]
+        self._db_refresh_connection_lists()
+
+    def _db_run_quick_query(self) -> None:
+        row = self.db_saved_list.currentRow()
+        if row < 0:
+            QMessageBox.warning(self, "Selezione", "Seleziona prima una connessione."); return
+        alias = list(self._active_connections.keys())[row]
+        sql   = self.db_quick_sql.toPlainText().strip()
+        if not sql: return
+        self._db_run_on(alias, sql)
+
+    def _db_run_on(self, alias: str, sql: str) -> None:
+        info = self._active_connections.get(alias)
+        if not info:
+            QMessageBox.warning(self, "Connessione", "Connessione '" + alias + "' non trovata."); return
+        sdk = info.get("sdk")
+        try:
+            if sdk == "pymongo":
+                coll = info["engine"][info["db_name"]][info["collection"]]
+                df = pd.DataFrame(list(coll.find({}, {"_id": 0})))
+            elif sdk == "influxdb-client":
+                query_api = info["engine"].query_api()
+                df = query_api.query_data_frame(sql)
+            elif sdk == "boto3":
+                table = info["engine"].Table(info["table"])
+                df = pd.DataFrame(table.scan()["Items"])
+            elif sdk == "elasticsearch":
+                resp = info["engine"].search(index=info["index"], size=1000)
+                df = pd.DataFrame([h["_source"] for h in resp["hits"]["hits"]])
+            else:
+                df = pd.read_sql_query(sql, info["engine"])
+            self.db_quick_result_model.update_dataframe(df)
+            self.db_quick_result_table.resizeColumnsToContents()
+            self.db_quick_result_lbl.setText(
+                str(len(df)) + " righe x " + str(len(df.columns)) + " col  [" + alias + "]")
+        except Exception as exc:
+            QMessageBox.critical(self, "Errore query", str(exc))
+
+    def _db_import_table(self) -> None:
+        row = self.db_saved_list.currentRow()
+        if row < 0:
+            QMessageBox.warning(self, "Selezione", "Seleziona una connessione."); return
+        alias = list(self._active_connections.keys())[row]
+        table, ok = QInputDialog.getText(self, "Importa tabella",
+            "Nome tabella (o SELECT query):")
+        if not ok or not table.strip(): return
+        sql = table.strip() if table.strip().upper().startswith("SELECT")               else "SELECT * FROM " + table.strip()
+        try:
+            df = pd.read_sql_query(sql, self._active_connections[alias]["engine"])
+            self._set_raw_df(df, label=alias + "::" + table.strip())
+            self.query_subtabs.setCurrentIndex(4)
+        except Exception as exc:
+            QMessageBox.critical(self, "Errore importazione", str(exc))
+
+    def _db_browse_schema(self) -> None:
+        from PySide6.QtWidgets import QTreeWidgetItem
+        alias = self.schema_conn_combo.currentText()
+        if not alias or alias not in self._active_connections:
+            QMessageBox.warning(self, "Connessione", "Seleziona una connessione attiva."); return
+        if not require_optional("sqlalchemy", reason="ispezione schema database"):
+            return
+        try:
+            import sqlalchemy as sa
+            engine = self._active_connections[alias]["engine"]
+            insp   = sa.inspect(engine)
+            self.schema_tree.clear()
+            try:
+                schemas = insp.get_schema_names()
+            except Exception:
+                schemas = [None]
+            for schema in schemas:
+                schema_item = QTreeWidgetItem(self.schema_tree,
+                    [schema or "(default)", "schema"])
+                schema_item.setExpanded(True)
+                try:
+                    tables = insp.get_table_names(schema=schema)
+                except Exception:
+                    tables = []
+                for tbl in tables:
+                    tbl_item = QTreeWidgetItem(schema_item, [tbl, "table"])
+                    tbl_item.setData(0, Qt.ItemDataRole.UserRole,
+                                     {"alias": alias, "schema": schema, "table": tbl})
+                    try:
+                        cols = insp.get_columns(tbl, schema=schema)
+                        for col in cols:
+                            QTreeWidgetItem(tbl_item,
+                                [col["name"], str(col.get("type",""))])
+                    except Exception:
+                        pass
+            self.schema_tree.itemClicked.connect(self._db_schema_item_clicked)
+            self._set_status("Schema esplorato: " + alias)
+        except Exception as exc:
+            QMessageBox.critical(self, "Errore schema", str(exc))
+
+    def _db_schema_item_clicked(self, item, _col) -> None:
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data or "table" not in data: return
+        alias  = data["alias"]; schema = data["schema"]; table = data["table"]
+        info   = self._active_connections.get(alias)
+        if not info: return
+        try:
+            import sqlalchemy as sa
+            insp = sa.inspect(info["engine"])
+            cols = insp.get_columns(table, schema=schema)
+            pk   = insp.get_pk_constraint(table, schema=schema)
+            fks  = insp.get_foreign_keys(table, schema=schema)
+            idxs = insp.get_indexes(table, schema=schema)
+            lines = ["Tabella: " + (schema+"." if schema else "") + table, "-"*50, "COLONNE:"]
+            for c in cols:
+                nullable = "" if c.get("nullable", True) else " NOT NULL"
+                default  = " DEFAULT " + str(c["default"]) if c.get("default") else ""
+                lines.append("  " + c["name"].ljust(25) + str(c.get("type","")).ljust(20) + nullable + default)
+            if pk.get("constrained_columns"):
+                lines += ["", "PRIMARY KEY: " + str(pk["constrained_columns"])]
+            if fks:
+                lines.append("FOREIGN KEYS:")
+                for fk in fks:
+                    lines.append("  " + str(fk["constrained_columns"]) +
+                                 " -> " + fk["referred_table"] + "." + str(fk["referred_columns"]))
+            if idxs:
+                lines.append("INDICI:")
+                for ix in idxs:
+                    lines.append("  " + str(ix["name"]) + ": " + str(ix["column_names"]) +
+                                 (" UNIQUE" if ix.get("unique") else ""))
+            self.schema_detail.setPlainText("\n".join(lines))
+        except Exception as exc:
+            self.schema_detail.setPlainText("Errore: " + str(exc))
+
+    def _db_preview_table(self) -> None:
+        item = self.schema_tree.currentItem()
+        if not item: return
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data or "table" not in data: return
+        alias = data["alias"]; table = data["table"]; schema = data["schema"]
+        fqt = (schema + "." + table) if schema and schema != "main" else table
+        self._db_run_on(alias, "SELECT * FROM " + fqt + " LIMIT 200")
+
+    def _db_load_selected_table(self) -> None:
+        item = self.schema_tree.currentItem()
+        if not item: return
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data or "table" not in data: return
+        alias = data["alias"]; table = data["table"]; schema = data["schema"]
+        fqt = (schema + "." + table) if schema and schema != "main" else table
+        try:
+            df = pd.read_sql_table(table, self._active_connections[alias]["engine"], schema=schema)
+            self._set_raw_df(df, label=alias + "::" + fqt)
+            self.query_subtabs.setCurrentIndex(4)
+        except Exception as exc:
+            QMessageBox.critical(self, "Errore caricamento", str(exc))
 
     def _db_quick_sqlite(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Apri SQLite", "", "SQLite (*.db *.sqlite)"
-        )
-        if path:
-            try:
-                df = DataImporter._load_sqlite_first_table(Path(path))
-                self._set_raw_df(df, label=path)
-                self.query_subtabs.setCurrentIndex(3)
-            except Exception as exc:
-                QMessageBox.critical(self, "Errore", str(exc))
+            self, "Apri SQLite", "", "SQLite (*.db *.sqlite)")
+        if not path: return
+        alias = Path(path).stem
+        try:
+            import sqlalchemy as sa
+            engine = sa.create_engine("sqlite:///" + path)
+            with engine.connect() as conn:
+                conn.execute(sa.text("SELECT 1"))
+            self._active_connections[alias] = {
+                "engine": engine, "type": "SQLite",
+                "url": "sqlite:///" + path, "url_masked": "sqlite:///" + path,
+                "pool": 1, "timeout": 10,
+            }
+            self._db_refresh_connection_lists(alias)
+        except Exception:
+            pass
+        try:
+            df = DataImporter._load_sqlite_first_table(Path(path))
+            self._set_raw_df(df, label=path)
+            self.query_subtabs.setCurrentIndex(4)
+        except Exception as exc:
+            QMessageBox.critical(self, "Errore", str(exc))
 
-    # ── C · Editor SQL ────────────────────────────────────────────────────────
+    # ======================================================================
+    # C · CLOUD DATABASE
+    # ======================================================================
+
+    _CLOUD_PROVIDERS: dict = {
+        "Amazon RDS (PostgreSQL)": {
+            "group":"AWS","icon":"AWS",
+            "pkg":"psycopg2-binary sqlalchemy",
+            "url":"postgresql+psycopg2://{user}:{password}@{host}:{port}/{database}",
+            "port":"5432","fields":["host","port","database","user","password"],
+            "hint":"AWS RDS PostgreSQL. pip install psycopg2-binary sqlalchemy",
+        },
+        "Amazon RDS (MySQL)": {
+            "group":"AWS","icon":"AWS",
+            "pkg":"pymysql sqlalchemy",
+            "url":"mysql+pymysql://{user}:{password}@{host}:{port}/{database}",
+            "port":"3306","fields":["host","port","database","user","password"],
+            "hint":"AWS RDS MySQL/Aurora. pip install pymysql sqlalchemy",
+        },
+        "Amazon Redshift": {
+            "group":"AWS","icon":"AWS",
+            "pkg":"redshift-connector sqlalchemy-redshift",
+            "url":"redshift+redshift_connector://{user}:{password}@{host}:{port}/{database}",
+            "port":"5439","fields":["host","port","database","user","password"],
+            "hint":"Redshift DWH. pip install redshift-connector sqlalchemy-redshift",
+        },
+        "Amazon Athena": {
+            "group":"AWS","icon":"AWS",
+            "pkg":"PyAthena sqlalchemy",
+            "url":"awsathena+rest://{user}:{password}@athena.{extra1}.amazonaws.com:443/{database}?s3_staging_dir={extra2}",
+            "port":"443","fields":["database","user","password","extra1","extra2"],
+            "hint":"Athena (query su S3). extra1=regione, extra2=s3://bucket/staging. pip install PyAthena",
+        },
+        "Google BigQuery": {
+            "group":"GCP","icon":"GCP",
+            "pkg":"google-cloud-bigquery sqlalchemy-bigquery",
+            "url":"bigquery://{extra1}/{database}",
+            "port":"","fields":["database","extra1","credentials_file"],
+            "hint":"BigQuery. extra1=project_id. pip install google-cloud-bigquery sqlalchemy-bigquery",
+        },
+        "Google Cloud SQL (PostgreSQL)": {
+            "group":"GCP","icon":"GCP",
+            "pkg":"psycopg2-binary cloud-sql-python-connector sqlalchemy",
+            "url":"postgresql+psycopg2://{user}:{password}@{host}:{port}/{database}",
+            "port":"5432","fields":["host","port","database","user","password"],
+            "hint":"Cloud SQL PostgreSQL. pip install psycopg2-binary cloud-sql-python-connector",
+        },
+        "Google Cloud Spanner": {
+            "group":"GCP","icon":"GCP",
+            "pkg":"sqlalchemy-spanner google-cloud-spanner",
+            "url":"spanner+spanner:///projects/{extra1}/instances/{extra2}/databases/{database}",
+            "port":"","fields":["database","extra1","extra2","credentials_file"],
+            "hint":"Spanner. extra1=project, extra2=instance. pip install sqlalchemy-spanner google-cloud-spanner",
+        },
+        "Azure SQL Database": {
+            "group":"Azure","icon":"Azure",
+            "pkg":"pyodbc sqlalchemy",
+            "url":"mssql+pyodbc://{user}:{password}@{host}:{port}/{database}?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes",
+            "port":"1433","fields":["host","port","database","user","password"],
+            "hint":"Azure SQL. Richiede ODBC Driver 17+. pip install pyodbc sqlalchemy",
+        },
+        "Azure Synapse Analytics": {
+            "group":"Azure","icon":"Azure",
+            "pkg":"pyodbc sqlalchemy",
+            "url":"mssql+pyodbc://{user}:{password}@{host}:{port}/{database}?driver=ODBC+Driver+17+for+SQL+Server",
+            "port":"1433","fields":["host","port","database","user","password"],
+            "hint":"Synapse (ex SQL DW). pip install pyodbc sqlalchemy",
+        },
+        "Azure PostgreSQL Flexible": {
+            "group":"Azure","icon":"Azure",
+            "pkg":"psycopg2-binary sqlalchemy",
+            "url":"postgresql+psycopg2://{user}:{password}@{host}:{port}/{database}?sslmode=require",
+            "port":"5432","fields":["host","port","database","user","password"],
+            "hint":"Azure Database for PostgreSQL Flexible. pip install psycopg2-binary sqlalchemy",
+        },
+        "Snowflake": {
+            "group":"Snowflake","icon":"Snowflake",
+            "pkg":"snowflake-sqlalchemy snowflake-connector-python",
+            "url":"snowflake://{user}:{password}@{extra1}/{database}/{extra2}",
+            "port":"","fields":["database","user","password","extra1","extra2"],
+            "hint":"Snowflake DWH. extra1=account, extra2=schema/warehouse. pip install snowflake-sqlalchemy",
+        },
+        "Databricks SQL": {
+            "group":"Databricks","icon":"Databricks",
+            "pkg":"databricks-sql-connector sqlalchemy-databricks",
+            "url":"databricks+connector://token:{password}@{host}:{port}/{database}?http_path={extra1}",
+            "port":"443","fields":["host","port","database","password","extra1"],
+            "hint":"Databricks SQL Warehouse. extra1=http_path. pip install databricks-sql-connector",
+        },
+        "MongoDB Atlas": {
+            "group":"MongoDB","icon":"MongoDB",
+            "pkg":"pymongo",
+            "url":"",
+            "port":"","fields":["host","database","user","password","extra1"],
+            "hint":"MongoDB Atlas (SDK). extra1=collection. pip install pymongo pandas",
+        },
+        "Supabase (PostgreSQL)": {
+            "group":"BaaS","icon":"BaaS",
+            "pkg":"psycopg2-binary sqlalchemy",
+            "url":"postgresql+psycopg2://{user}:{password}@{host}:{port}/{database}?sslmode=require",
+            "port":"5432","fields":["host","port","database","user","password"],
+            "hint":"Supabase usa PostgreSQL standard. Host: db.<project>.supabase.co",
+        },
+        "Neon (serverless Postgres)": {
+            "group":"BaaS","icon":"BaaS",
+            "pkg":"psycopg2-binary sqlalchemy",
+            "url":"postgresql+psycopg2://{user}:{password}@{host}/{database}?sslmode=require&options=endpoint%3D{extra1}",
+            "port":"5432","fields":["host","database","user","password","extra1"],
+            "hint":"Neon serverless. extra1=endpoint_id. pip install psycopg2-binary sqlalchemy",
+        },
+        "CockroachDB": {
+            "group":"BaaS","icon":"BaaS",
+            "pkg":"psycopg2-binary sqlalchemy-cockroachdb",
+            "url":"cockroachdb+psycopg2://{user}:{password}@{host}:{port}/{database}?sslmode=require",
+            "port":"26257","fields":["host","port","database","user","password"],
+            "hint":"CockroachDB Cloud. pip install psycopg2-binary sqlalchemy-cockroachdb",
+        },
+        "PlanetScale (MySQL)": {
+            "group":"BaaS","icon":"BaaS",
+            "pkg":"pymysql sqlalchemy",
+            "url":"mysql+pymysql://{user}:{password}@{host}/{database}",
+            "port":"3306","fields":["host","database","user","password"],
+            "hint":"PlanetScale (MySQL compatibile, SSL). pip install pymysql sqlalchemy",
+        },
+        "ClickHouse": {
+            "group":"OLAP","icon":"OLAP",
+            "pkg":"clickhouse-driver sqlalchemy-clickhouse",
+            "url":"clickhouse+native://{user}:{password}@{host}:{port}/{database}",
+            "port":"9000","fields":["host","port","database","user","password"],
+            "hint":"ClickHouse analytics. pip install clickhouse-driver sqlalchemy-clickhouse",
+        },
+        "InfluxDB 2.x": {
+            "group":"Time-Series","icon":"TS",
+            "pkg":"influxdb-client",
+            "url":"",
+            "port":"8086","fields":["host","port","database","password","extra1"],
+            "hint":"InfluxDB 2.x (SDK). password=token, extra1=org. pip install influxdb-client pandas",
+        },
+        "Elasticsearch": {
+            "group":"Search","icon":"ES",
+            "pkg":"elasticsearch eland",
+            "url":"",
+            "port":"9200","fields":["host","port","database","user","password"],
+            "hint":"Elasticsearch via SDK. database=index. pip install elasticsearch eland pandas",
+        },
+    }
+
+    def _build_cloud_db_tab(self) -> QWidget:
+        widget = QWidget(); layout = QVBoxLayout(widget); layout.setContentsMargins(0,0,0,0)
+        inner = QTabWidget()
+        inner.addTab(self._build_cloud_connect_panel(), "Connetti")
+        inner.addTab(self._build_cloud_guide_panel(),   "Guida & Driver")
+        inner.addTab(self._build_cloud_template_panel(),"Template codice")
+        layout.addWidget(inner)
+        return widget
+
+    def _build_cloud_connect_panel(self) -> QWidget:
+        widget = QWidget(); layout = QVBoxLayout(widget); layout.setContentsMargins(8,8,8,8)
+        prov_bar = QHBoxLayout()
+        self.cloud_group_combo = QComboBox()
+        groups = sorted(set(v["group"] for v in self._CLOUD_PROVIDERS.values()))
+        self.cloud_group_combo.addItem("-- Tutti --"); self.cloud_group_combo.addItems(groups)
+        self.cloud_group_combo.currentTextChanged.connect(self._cloud_filter_providers)
+        self.cloud_provider_combo = QComboBox(); self.cloud_provider_combo.setMinimumWidth(280)
+        self.cloud_provider_combo.addItems(list(self._CLOUD_PROVIDERS.keys()))
+        self.cloud_provider_combo.currentTextChanged.connect(self._cloud_on_provider_changed)
+        prov_bar.addWidget(QLabel("Gruppo:")); prov_bar.addWidget(self.cloud_group_combo)
+        prov_bar.addWidget(QLabel("Provider:")); prov_bar.addWidget(self.cloud_provider_combo)
+        prov_bar.addStretch()
+        form_group = QGroupBox("Parametri connessione cloud")
+        fl = QFormLayout(form_group)
+        self.cloud_alias    = QLineEdit(); self.cloud_alias.setPlaceholderText("Nome connessione")
+        self.cloud_host     = QLineEdit(); self.cloud_host.setPlaceholderText("host / endpoint")
+        self.cloud_port     = QLineEdit()
+        self.cloud_database = QLineEdit(); self.cloud_database.setPlaceholderText("database / dataset / bucket")
+        self.cloud_user     = QLineEdit(); self.cloud_user.setPlaceholderText("utente / access key / token")
+        self.cloud_pass     = QLineEdit(); self.cloud_pass.setEchoMode(QLineEdit.EchoMode.Password)
+        self.cloud_pass.setPlaceholderText("password / secret / token")
+        btn_show_cp = QPushButton("mostra"); btn_show_cp.setMaximumWidth(55); btn_show_cp.setCheckable(True)
+        btn_show_cp.clicked.connect(
+            lambda c: self.cloud_pass.setEchoMode(
+                QLineEdit.EchoMode.Normal if c else QLineEdit.EchoMode.Password))
+        cp_row = QHBoxLayout(); cp_row.addWidget(self.cloud_pass); cp_row.addWidget(btn_show_cp)
+        self.cloud_extra1   = QLineEdit(); self.cloud_extra1.setPlaceholderText("campo extra 1")
+        self.cloud_extra2   = QLineEdit(); self.cloud_extra2.setPlaceholderText("campo extra 2")
+        self.cloud_cred_file= QLineEdit(); self.cloud_cred_file.setPlaceholderText("JSON credenziali")
+        btn_browse_cred = QPushButton("..."); btn_browse_cred.setMaximumWidth(28)
+        btn_browse_cred.clicked.connect(self._cloud_browse_cred)
+        cred_row = QHBoxLayout(); cred_row.addWidget(self.cloud_cred_file); cred_row.addWidget(btn_browse_cred)
+        self.cloud_ssl_check  = QCheckBox("SSL/TLS")
+        self.cloud_timeout    = QSpinBox(); self.cloud_timeout.setRange(5,300); self.cloud_timeout.setValue(30)
+        self.cloud_timeout.setSuffix("s"); self.cloud_timeout.setPrefix("Timeout: ")
+        self.cloud_pool_size  = QSpinBox(); self.cloud_pool_size.setRange(1,20); self.cloud_pool_size.setValue(3)
+        self.cloud_pool_size.setPrefix("Pool: ")
+        self.cloud_hint_lbl = QLabel()
+        self.cloud_hint_lbl.setWordWrap(True)
+        self.cloud_hint_lbl.setStyleSheet("background:#FFF8E1;padding:6px;color:#555;font-size:11px;")
+        for label, w in [
+            ("Alias:",         self.cloud_alias),
+            ("Host/Endpoint:", self.cloud_host),
+            ("Porta:",         self.cloud_port),
+            ("Database:",      self.cloud_database),
+            ("Utente/Key:",    self.cloud_user),
+            ("Password:",      _wrap(cp_row)),
+            ("Extra 1:",       self.cloud_extra1),
+            ("Extra 2:",       self.cloud_extra2),
+            ("Credenziali JSON:", _wrap(cred_row)),
+        ]:
+            fl.addRow(label, w)
+        opts_r = QHBoxLayout()
+        opts_r.addWidget(self.cloud_ssl_check); opts_r.addWidget(self.cloud_timeout)
+        opts_r.addWidget(self.cloud_pool_size); opts_r.addStretch()
+        fl.addRow("Opzioni:", _wrap(opts_r))
+        fl.addRow("Nota:", self.cloud_hint_lbl)
+        self.cloud_url_preview = QLabel("URL: --")
+        self.cloud_url_preview.setStyleSheet("font-family:monospace;font-size:10px;color:#555;background:#f5f5f5;padding:4px;")
+        self.cloud_url_preview.setWordWrap(True)
+        for w in [self.cloud_host, self.cloud_port, self.cloud_database,
+                  self.cloud_user, self.cloud_extra1, self.cloud_extra2]:
+            w.textChanged.connect(self._cloud_update_url_preview)
+        btn_test_cloud    = QPushButton("Testa connessione")
+        btn_connect_cloud = QPushButton("Connetti e salva")
+        btn_install       = QPushButton("Mostra pip install")
+        btn_test_cloud.clicked.connect(self._cloud_test)
+        btn_connect_cloud.clicked.connect(self._cloud_connect)
+        btn_install.clicked.connect(self._cloud_show_install)
+        act_row = QHBoxLayout()
+        act_row.addWidget(btn_test_cloud); act_row.addWidget(btn_connect_cloud)
+        act_row.addStretch(); act_row.addWidget(btn_install)
+        self.cloud_conn_use_combo = QComboBox(); self.cloud_conn_use_combo.setMinimumWidth(180)
+        btn_cloud_use   = QPushButton("Usa in SQL Editor"); btn_cloud_use.clicked.connect(self._cloud_use)
+        btn_cloud_query = QPushButton("Query rapida");      btn_cloud_query.clicked.connect(self._cloud_quick_query)
+        use_bar = QHBoxLayout()
+        use_bar.addWidget(QLabel("Connessione:")); use_bar.addWidget(self.cloud_conn_use_combo)
+        use_bar.addWidget(btn_cloud_use); use_bar.addWidget(btn_cloud_query); use_bar.addStretch()
+        layout.addLayout(prov_bar); layout.addWidget(form_group); layout.addLayout(act_row)
+        layout.addWidget(QLabel("URL preview:")); layout.addWidget(self.cloud_url_preview)
+        layout.addSpacing(6); layout.addLayout(use_bar)
+        self._cloud_on_provider_changed(self.cloud_provider_combo.currentText())
+        return widget
+
+    def _build_cloud_guide_panel(self) -> QWidget:
+        widget = QWidget(); layout = QVBoxLayout(widget)
+        guide = QTextEdit(); guide.setReadOnly(True); guide.setFont(QFont("Courier New", 10))
+        lines = ["GUIDA RAPIDA CONNESSIONI CLOUD DATABASE", "="*60, ""]
+        groups: Dict[str, list] = {}
+        for name, cfg in self._CLOUD_PROVIDERS.items():
+            groups.setdefault(cfg["group"], []).append((name, cfg))
+        for grp, items in groups.items():
+            lines += ["-- " + grp + " " + "-"*50, ""]
+            for name, cfg in items:
+                lines += [
+                    "  [" + cfg["icon"] + "] " + name,
+                    "     pip install: " + cfg["pkg"],
+                    "     " + cfg["hint"].splitlines()[0],
+                    "",
+                ]
+        guide.setPlainText("\n".join(lines))
+        layout.addWidget(guide)
+        return widget
+
+    def _build_cloud_template_panel(self) -> QWidget:
+        widget = QWidget(); layout = QVBoxLayout(widget)
+        self.cloud_tmpl_provider = QComboBox()
+        self.cloud_tmpl_provider.addItems(list(self._CLOUD_PROVIDERS.keys()))
+        self.cloud_tmpl_provider.currentTextChanged.connect(self._cloud_update_template)
+        self.cloud_tmpl_text = QTextEdit(); self.cloud_tmpl_text.setReadOnly(True)
+        self.cloud_tmpl_text.setFont(QFont("Courier New", 10))
+        btn_copy = QPushButton("Copia")
+        btn_copy.clicked.connect(lambda: QApplication.clipboard().setText(
+            self.cloud_tmpl_text.toPlainText()))
+        bar = QHBoxLayout(); bar.addWidget(QLabel("Provider:"))
+        bar.addWidget(self.cloud_tmpl_provider); bar.addStretch(); bar.addWidget(btn_copy)
+        layout.addLayout(bar); layout.addWidget(self.cloud_tmpl_text, stretch=1)
+        self._cloud_update_template(self.cloud_tmpl_provider.currentText())
+        return widget
+
+    # -- Cloud logic ---------------------------------------------------------
+
+    def _cloud_filter_providers(self, group: str) -> None:
+        self.cloud_provider_combo.blockSignals(True)
+        self.cloud_provider_combo.clear()
+        for name, cfg in self._CLOUD_PROVIDERS.items():
+            if group in ("-- Tutti --", cfg["group"]):
+                self.cloud_provider_combo.addItem(name)
+        self.cloud_provider_combo.blockSignals(False)
+        if self.cloud_provider_combo.count() > 0:
+            self._cloud_on_provider_changed(self.cloud_provider_combo.currentText())
+
+    def _cloud_on_provider_changed(self, _=None) -> None:
+        name = self.cloud_provider_combo.currentText()
+        cfg  = self._CLOUD_PROVIDERS.get(name, {})
+        fields = cfg.get("fields", [])
+        self.cloud_host.setEnabled("host" in fields)
+        self.cloud_port.setEnabled("port" in fields)
+        self.cloud_port.setText(cfg.get("port",""))
+        self.cloud_database.setEnabled("database" in fields)
+        self.cloud_user.setEnabled(any(f in fields for f in ["user","aws_key","token"]))
+        self.cloud_pass.setEnabled("password" in fields)
+        self.cloud_cred_file.setEnabled("credentials_file" in fields)
+        self.cloud_extra1.setEnabled("extra1" in fields)
+        self.cloud_extra2.setEnabled("extra2" in fields)
+        self.cloud_hint_lbl.setText(cfg.get("hint",""))
+        self._cloud_update_url_preview()
+
+    def _cloud_build_url(self) -> str:
+        name = self.cloud_provider_combo.currentText()
+        cfg  = self._CLOUD_PROVIDERS.get(name, {})
+        if not cfg.get("url"): return "(SDK diretto - nessuna URL SQLAlchemy)"
+        import urllib.parse
+        pwd_enc = urllib.parse.quote_plus(self.cloud_pass.text()) if self.cloud_pass.text() else ""
+        try:
+            url = cfg["url"].format(
+                host=self.cloud_host.text().strip() or "host",
+                port=self.cloud_port.text().strip() or cfg.get("port",""),
+                database=self.cloud_database.text().strip() or "database",
+                user=self.cloud_user.text().strip() or "user",
+                password=pwd_enc,
+                extra1=self.cloud_extra1.text().strip() or "extra1",
+                extra2=self.cloud_extra2.text().strip() or "extra2",
+            )
+        except KeyError:
+            url = cfg.get("url","")
+        return url
+
+    def _cloud_update_url_preview(self, *_) -> None:
+        import re
+        url = self._cloud_build_url()
+        url_d = re.sub(r":[^:@/]{2,}@", ":***@", url)
+        self.cloud_url_preview.setText("URL: " + url_d)
+
+    def _cloud_browse_cred(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Credenziali JSON", "", "JSON (*.json)")
+        if path: self.cloud_cred_file.setText(path)
+
+    def _cloud_test(self) -> None:
+        name = self.cloud_provider_combo.currentText()
+        cfg  = self._CLOUD_PROVIDERS.get(name, {})
+        url  = self._cloud_build_url()
+        if "(SDK" in url:
+            QMessageBox.information(self, "SDK",
+                name + " usa SDK Python diretto.\nUsa 'Connetti e salva'."); return
+        # Installa sqlalchemy + driver del provider
+        if not require_optional("sqlalchemy", reason="connessioni cloud database"):
+            return
+        pkg_list = [p.strip() for p in cfg.get("pkg","").split() if p.strip()]
+        if pkg_list:
+            if not require_optional_group(name, pkg_list,
+                    reason="driver per " + name):
+                return
+        try:
+            import sqlalchemy as sa, re
+            engine = sa.create_engine(url, pool_pre_ping=True)
+            with engine.connect() as conn: conn.execute(sa.text("SELECT 1"))
+            engine.dispose()
+            url_d = re.sub(r":[^:@/]{2,}@", ":***@", url)
+            QMessageBox.information(self, "Test superato", "Connessione riuscita!\n" + url_d)
+        except Exception as exc:
+            QMessageBox.critical(self, "Test fallito", str(exc))
+
+    def _cloud_connect(self) -> None:
+        alias = self.cloud_alias.text().strip()
+        name  = self.cloud_provider_combo.currentText()
+        cfg   = self._CLOUD_PROVIDERS.get(name, {})
+        if not alias:
+            QMessageBox.warning(self, "Alias", "Inserisci un alias."); return
+        url = self._cloud_build_url()
+        if "(SDK" in url:
+            self._cloud_connect_sdk(alias, name, cfg); return
+        # Installa dipendenze necessarie
+        if not require_optional("sqlalchemy", reason="connessioni database cloud"):
+            return
+        pkg_list = [p.strip() for p in cfg.get("pkg","").split() if p.strip()]
+        if pkg_list and not require_optional_group(name, pkg_list,
+                reason="driver per " + name):
+            return
+        try:
+            import sqlalchemy as sa, re
+            pool = self.cloud_pool_size.value()
+            engine = sa.create_engine(url, pool_size=pool, max_overflow=5, pool_pre_ping=True)
+            with engine.connect() as conn: conn.execute(sa.text("SELECT 1"))
+            url_masked = re.sub(r":[^:@/]{2,}@", ":***@", url)
+            self._active_connections[alias] = {
+                "engine": engine, "type": name,
+                "url": url, "url_masked": url_masked,
+                "pool": pool, "timeout": self.cloud_timeout.value(), "cloud": True,
+            }
+            self._db_refresh_connection_lists(alias)
+            QMessageBox.information(self, "Connesso",
+                "Connessione cloud '" + alias + "' stabilita.\n" + url_masked)
+        except Exception as exc:
+            QMessageBox.critical(self, "Errore", str(exc))
+
+    def _cloud_connect_sdk(self, alias: str, name: str, cfg: Dict) -> None:
+        # Installa il pacchetto SDK necessario prima di procedere
+        pkg_list = [p.strip() for p in cfg.get("pkg","").split() if p.strip()]
+        if pkg_list and not require_optional_group(name, pkg_list,
+                reason="SDK per " + name):
+            return
+        try:
+            if "MongoDB" in name:
+                pymongo = importlib.import_module("pymongo")
+                uri = ("mongodb+srv://" + self.cloud_user.text() + ":" +
+                       self.cloud_pass.text() + "@" + self.cloud_host.text() +
+                       "/" + self.cloud_database.text())
+                client = pymongo.MongoClient(uri,
+                    serverSelectionTimeoutMS=self.cloud_timeout.value()*1000)
+                client.server_info()
+                self._active_connections[alias] = {
+                    "engine": client, "type": name,
+                    "url": "", "url_masked": "mongodb+srv://***@" + self.cloud_host.text(),
+                    "pool": 1, "timeout": self.cloud_timeout.value(), "cloud": True,
+                    "sdk": "pymongo", "db_name": self.cloud_database.text(),
+                    "collection": self.cloud_extra1.text().strip(),
+                }
+            elif "InfluxDB" in name:
+                from influxdb_client import InfluxDBClient  # type: ignore
+                scheme = "https" if self.cloud_ssl_check.isChecked() else "http"
+                client = InfluxDBClient(
+                    url=scheme + "://" + self.cloud_host.text() + ":" + self.cloud_port.text(),
+                    token=self.cloud_pass.text(), org=self.cloud_extra1.text())
+                client.ping()
+                self._active_connections[alias] = {
+                    "engine": client, "type": name, "url": "", "url_masked": "",
+                    "pool": 1, "timeout": self.cloud_timeout.value(), "cloud": True,
+                    "sdk": "influxdb-client", "org": self.cloud_extra1.text(),
+                    "bucket": self.cloud_database.text(),
+                }
+            elif "Elasticsearch" in name:
+                from elasticsearch import Elasticsearch  # type: ignore
+                scheme = "https" if self.cloud_ssl_check.isChecked() else "http"
+                es = Elasticsearch(
+                    scheme + "://" + self.cloud_host.text() + ":" + self.cloud_port.text(),
+                    http_auth=(self.cloud_user.text(), self.cloud_pass.text()))
+                es.info()
+                self._active_connections[alias] = {
+                    "engine": es, "type": name, "url": "", "url_masked": "",
+                    "pool": 1, "timeout": self.cloud_timeout.value(), "cloud": True,
+                    "sdk": "elasticsearch", "index": self.cloud_database.text(),
+                }
+            else:
+                QMessageBox.warning(self, "SDK",
+                    "SDK per '" + name + "' non ancora implementato."); return
+            self._db_refresh_connection_lists(alias)
+            QMessageBox.information(self, "Connesso SDK",
+                "Connessione '" + alias + "' tramite SDK stabilita.")
+        except ImportError as exc:
+            QMessageBox.warning(self, "Libreria mancante",
+                "pip install " + cfg.get("pkg","") + "\n\n" + str(exc))
+        except Exception as exc:
+            QMessageBox.critical(self, "Errore SDK", str(exc))
+
+    def _cloud_show_install(self) -> None:
+        name = self.cloud_provider_combo.currentText()
+        cfg  = self._CLOUD_PROVIDERS.get(name, {})
+        QMessageBox.information(self, "Installa driver - " + name,
+            "pip install sqlalchemy " + cfg.get("pkg","") + "\n\n" +
+            "URL template:\n" + cfg.get("url","(SDK diretto)"))
+
+    def _cloud_use(self) -> None:
+        alias = self.cloud_conn_use_combo.currentText()
+        if not alias: return
+        idx = self.sql_conn_combo.findText(alias)
+        if idx >= 0: self.sql_conn_combo.setCurrentIndex(idx)
+        self.query_subtabs.setCurrentIndex(3)
+
+    def _cloud_quick_query(self) -> None:
+        alias = self.cloud_conn_use_combo.currentText()
+        if not alias: return
+        sql, ok = QInputDialog.getText(self, "Query rapida",
+            "SELECT query:", text="SELECT 1")
+        if ok and sql.strip():
+            self._db_run_on(alias, sql.strip())
+
+    def _cloud_update_template(self, name: str) -> None:
+        cfg = self._CLOUD_PROVIDERS.get(name, {})
+        url_tmpl = cfg.get("url", "")
+        lines = [
+            "# Template connessione - " + name,
+            "# Installa: pip install sqlalchemy " + cfg.get("pkg",""),
+            "",
+            "from sqlalchemy import create_engine, text",
+            "import pandas as pd",
+            "",
+        ]
+        if url_tmpl and "(SDK" not in url_tmpl:
+            lines += [
+                "engine = create_engine(",
+                '    "' + url_tmpl + '",',
+                "    pool_size=5, max_overflow=10, pool_pre_ping=True",
+                ")",
+                "",
+                "# Leggi tabella",
+                'df = pd.read_sql_table("nome_tabella", engine)',
+                "",
+                "# Query custom",
+                'df = pd.read_sql_query("SELECT * FROM tabella LIMIT 100", engine)',
+                "",
+                "engine.dispose()",
+            ]
+        elif "MongoDB" in name:
+            lines += [
+                "import pymongo",
+                'client = pymongo.MongoClient("mongodb+srv://user:pass@host/db")',
+                'coll = client["database"]["collection"]',
+                "df = pd.DataFrame(list(coll.find({}, {'_id': 0})))",
+            ]
+        elif "InfluxDB" in name:
+            lines += [
+                "from influxdb_client import InfluxDBClient",
+                'client = InfluxDBClient(url="http://host:8086", token="TOKEN", org="ORG")',
+                "api = client.query_api()",
+                "df = api.query_data_frame(",
+                "    'from(bucket:\"bucket\") |> range(start: -1h)'",
+                ")",
+            ]
+        elif "BigQuery" in name:
+            lines += [
+                "from google.cloud import bigquery",
+                'client = bigquery.Client(project="PROJECT")',
+                'df = client.query("SELECT * FROM `dataset.table` LIMIT 100").to_dataframe()',
+            ]
+        elif "Elasticsearch" in name:
+            lines += [
+                "from elasticsearch import Elasticsearch",
+                'es = Elasticsearch("http://host:9200",',
+                '    http_auth=("user","pass"))',
+                'resp = es.search(index="my_index", size=1000)',
+                "df = pd.DataFrame([h['_source'] for h in resp['hits']['hits']])",
+            ]
+        self.cloud_tmpl_text.setPlainText("\n".join(lines))
+
+    # -- Override SQL editor to use real connections --------------------------
+
+    # ── D · Editor SQL ────────────────────────────────────────────
+
 
     def _build_sql_tab(self) -> QWidget:
         widget = QWidget()
@@ -1436,7 +2522,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Nessun risultato", "Esegui prima una query SQL.")
             return
         self._set_raw_df(self.sql_result_df, label="Risultato SQL")
-        self.query_subtabs.setCurrentIndex(3)
+        self.query_subtabs.setCurrentIndex(4)
 
     def _sql_save(self) -> None:
         query = self.sql_editor.toPlainText().strip()
@@ -1883,7 +2969,7 @@ class MainWindow(QMainWindow):
         choice, ok = QInputDialog.getItem(self, "Rimuovi duplicati",
             "Quale occorrenza mantenere?", items, 0, False)
         if not ok: return
-        keep = False if "False" in choice else choice
+        keep = cast(Literal["first", "last", False], False if "False" in choice else choice)
         before = len(self.working_df)
         self._etl_apply(
             lambda: ETLEngine.drop_duplicates(self.working_df, keep=keep),
@@ -2393,10 +3479,13 @@ class MainWindow(QMainWindow):
         # Correlazioni
         if len(num_cols) >= 2:
             corr = df[num_cols].corr().abs()
-            high = [(c1,c2,corr.loc[c1,c2])
-                    for i,c1 in enumerate(num_cols)
-                    for c2 in num_cols[i+1:]
-                    if not math.isnan(corr.loc[c1,c2]) and corr.loc[c1,c2] >= 0.7]
+            corr_values = corr.to_numpy(dtype=float)
+            high: List[Tuple[str, str, float]] = []
+            for i, c1 in enumerate(num_cols):
+                for j, c2 in enumerate(num_cols[i+1:], start=i+1):
+                    corr_value = corr_values[i, j]
+                    if not math.isnan(corr_value) and corr_value >= 0.7:
+                        high.append((c1, c2, corr_value))
             lines.append("CORRELAZIONI SIGNIFICATIVE (|r| ≥ 0.7)")
             if high:
                 for c1,c2,v in sorted(high, key=lambda x: -x[2]):
@@ -2439,7 +3528,10 @@ class MainWindow(QMainWindow):
 
     def _rpt_build_overview_charts(self, df, num_cols: list, cat_cols: list) -> None:
         for i in reversed(range(self.rpt_ov_canvas_layout.count())):
-            w = self.rpt_ov_canvas_layout.itemAt(i).widget()
+            item = self.rpt_ov_canvas_layout.itemAt(i)
+            if item is None:
+                continue
+            w = item.widget()
             if w: w.deleteLater()
 
         dpi = self.rpt_dpi_spin.value()
@@ -2459,7 +3551,7 @@ class MainWindow(QMainWindow):
               "Booleane":len(df.select_dtypes(include="bool").columns)}.items() if v}
         if tc:
             fig, ax = plt.subplots(figsize=(4.5, 3.5), dpi=dpi)
-            ax.pie(tc.values(), labels=tc.keys(), autopct="%1.0f%%", startangle=90)
+            ax.pie(list(tc.values()), labels=list(tc.keys()), autopct="%1.0f%%", startangle=90)
             ax.set_title("Tipi di colonna"); plt.tight_layout()
             self._rpt_add_canvas(fig, "Tipi colonna")
 
@@ -2467,9 +3559,13 @@ class MainWindow(QMainWindow):
         if num_cols:
             show = num_cols[:12]
             fig, ax = plt.subplots(figsize=(max(5, len(show)*0.8), 4), dpi=dpi)
-            ax.boxplot([df[c].dropna().values for c in show], labels=show,
-                       patch_artist=True)
-            ax.set_xticklabels(show, rotation=45, ha="right", fontsize=8)
+            box_data: List[np.ndarray] = [
+                pd.to_numeric(df[c], errors="coerce").dropna().to_numpy(dtype=float)
+                for c in show
+            ]
+            ax.boxplot(box_data, patch_artist=True)
+            ax.set_xticks(range(1, len(show) + 1))
+            ax.set_xticklabels([str(v) for v in show], rotation=45, ha="right", fontsize=8)
             ax.set_title("Box-plot variabili numeriche"); plt.tight_layout()
             self._rpt_add_canvas(fig, "Boxplot")
 
@@ -2477,14 +3573,15 @@ class MainWindow(QMainWindow):
         if len(num_cols) >= 2:
             show = num_cols[:14]
             corr = df[show].corr()
+            corr_values = corr.to_numpy(dtype=float)
             n = len(show)
             fig, ax = plt.subplots(figsize=(max(4, n*0.55), max(3.5, n*0.5)), dpi=dpi)
-            im = ax.imshow(corr.values, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
+            im = ax.imshow(corr_values, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
             ax.set_xticks(range(n)); ax.set_xticklabels(show, rotation=45, ha="right", fontsize=7)
             ax.set_yticks(range(n)); ax.set_yticklabels(show, fontsize=7)
             for i in range(n):
                 for j in range(n):
-                    ax.text(j, i, f"{corr.values[i,j]:.2f}", ha="center", va="center", fontsize=6)
+                    ax.text(j, i, f"{corr_values[i,j]:.2f}", ha="center", va="center", fontsize=6)
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
             ax.set_title("Matrice di correlazione"); plt.tight_layout()
             self._rpt_add_canvas(fig, "Correlazione")
@@ -2571,7 +3668,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.rpt_ch_canvas, stretch=1)
         return widget
 
-    def _rpt_ch_update_controls(self) -> None:
+    def _rpt_ch_update_controls(self, _=None) -> None:
         t = self.rpt_ch_type.currentText()
         self.rpt_ch_y.setEnabled(t in {"Scatter plot","Line chart","Area chart",
             "Grafico a barre (aggregato)","Grafico a bolle (bubble)",
@@ -2616,9 +3713,13 @@ class MainWindow(QMainWindow):
             x = df[xcol] if xcol != "(nessuna)" else None
             y = df[ycol] if ycol not in {"(nessuna)",""} else None
             h = df[hue]  if hue  not in {"(nessuna)",""} else None
+            if x is None:
+                QMessageBox.warning(self,"Colonna mancante","Seleziona una colonna X."); return
 
             if t == "Istogramma":
-                vals = x.dropna().values
+                vals = pd.to_numeric(x, errors="coerce").dropna().to_numpy(dtype=float)
+                if vals.size == 0:
+                    QMessageBox.warning(self,"Dati non validi","La colonna selezionata non contiene valori numerici."); return
                 if cumul:
                     ax.hist(vals, bins=bins, cumulative=True, density=True, color="#4477AA")
                 else:
@@ -2637,20 +3738,28 @@ class MainWindow(QMainWindow):
 
             elif t == "Box-plot":
                 if h is not None:
-                    groups = [df.loc[df[hue]==v, xcol].dropna() for v in df[hue].unique()]
-                    ax.boxplot(groups, labels=[str(v) for v in df[hue].unique()], patch_artist=True)
+                    hue_values = list(df[hue].dropna().unique())
+                    groups: List[np.ndarray] = [
+                        pd.to_numeric(df[xcol][df[hue] == v], errors="coerce").dropna().to_numpy(dtype=float)
+                        for v in hue_values
+                    ]
+                    ax.boxplot(groups, patch_artist=True)
+                    ax.set_xticks(range(1, len(hue_values) + 1))
+                    ax.set_xticklabels([str(v) for v in hue_values], rotation=30, ha="right")
                 else:
-                    ax.boxplot(x.dropna(), patch_artist=True, boxprops=dict(facecolor="#88AACC"))
+                    ax.boxplot(pd.to_numeric(x, errors="coerce").dropna().to_numpy(dtype=float),
+                               patch_artist=True, boxprops=dict(facecolor="#88AACC"))
                 ax.set_ylabel(xcol)
 
             elif t == "Grafico a barre (conteggio)":
                 vc = x.value_counts(dropna=False).head(30)
-                bars = ax.bar(range(len(vc)), vc.values, color="#4477AA", edgecolor="white")
+                vc_values = vc.to_numpy()
+                bars = ax.bar(range(len(vc)), vc_values, color="#4477AA", edgecolor="white")
                 ax.set_xticks(range(len(vc)))
                 ax.set_xticklabels([str(v) for v in vc.index], rotation=45, ha="right", fontsize=8)
                 ax.set_ylabel("Conteggio")
                 if annot:
-                    for bar, val in zip(bars, vc.values):
+                    for bar, val in zip(bars, vc_values):
                         ax.text(bar.get_x()+bar.get_width()/2, bar.get_height(),
                                 str(val), ha="center", va="bottom", fontsize=8)
 
@@ -2658,20 +3767,21 @@ class MainWindow(QMainWindow):
                 if y is None:
                     QMessageBox.warning(self,"Y","Seleziona colonna Y."); return
                 grp = df.groupby(xcol)[ycol].agg(agg).head(30)
-                bars = ax.bar(range(len(grp)), grp.values, color="#5599AA", edgecolor="white")
+                grp_values = pd.to_numeric(grp, errors="coerce").to_numpy(dtype=float)
+                bars = ax.bar(range(len(grp)), grp_values, color="#5599AA", edgecolor="white")
                 ax.set_xticks(range(len(grp)))
                 ax.set_xticklabels([str(v) for v in grp.index], rotation=45, ha="right", fontsize=8)
                 ax.set_ylabel(f"{agg}({ycol})")
                 if annot:
-                    for bar, val in zip(bars, grp.values):
+                    for bar, val in zip(bars, grp_values):
                         ax.text(bar.get_x()+bar.get_width()/2, bar.get_height(),
                                 f"{val:.2g}", ha="center", va="bottom", fontsize=8)
 
             elif t == "Grafico a torta / donut":
                 vc = x.value_counts(dropna=False).head(12)
-                ax.pie(vc.values, labels=[str(v) for v in vc.index],
+                ax.pie(vc.to_numpy(), labels=[str(v) for v in vc.index],
                        autopct="%1.1f%%", startangle=90)
-                ax.add_patch(plt.Circle((0,0), 0.55, fc="white"))
+                ax.add_patch(Circle((0,0), 0.55, fc="white"))
 
             elif t == "Scatter plot":
                 if y is None:
@@ -2679,46 +3789,60 @@ class MainWindow(QMainWindow):
                 if h is not None:
                     for v in df[hue].unique():
                         mask = df[hue]==v
-                        ax.scatter(df.loc[mask,xcol], df.loc[mask,ycol],
+                        ax.scatter(pd.to_numeric(df.loc[mask,xcol], errors="coerce"),
+                                   pd.to_numeric(df.loc[mask,ycol], errors="coerce"),
                                    label=str(v), alpha=0.6, s=30)
                     ax.legend(fontsize=8, title=hue)
                 else:
-                    ax.scatter(x, y, alpha=0.5, color="#4477AA", s=25)
+                    ax.scatter(pd.to_numeric(x, errors="coerce"),
+                               pd.to_numeric(y, errors="coerce"), alpha=0.5, color="#4477AA", s=25)
                 ax.set_xlabel(xcol); ax.set_ylabel(ycol)
 
             elif t == "Line chart":
                 nx = pd.to_numeric(x, errors="coerce")
                 if y is not None:
-                    ax.plot(nx, pd.to_numeric(y, errors="coerce"), color="#4477AA", lw=1.5)
+                    ax.plot(nx.to_numpy(dtype=float), pd.to_numeric(y, errors="coerce").to_numpy(dtype=float),
+                            color="#4477AA", lw=1.5)
                     ax.set_ylabel(ycol)
                 else:
-                    ax.plot(nx.values, color="#4477AA", lw=1.5)
+                    ax.plot(nx.to_numpy(dtype=float), color="#4477AA", lw=1.5)
                 ax.set_xlabel(xcol)
 
             elif t == "Area chart":
-                src = pd.to_numeric(y if y is not None else x, errors="coerce")
-                ax.fill_between(range(len(src)), src, alpha=0.5, color="#4477AA")
+                src = pd.to_numeric(y if y is not None else x, errors="coerce").dropna().to_numpy(dtype=float)
+                area_x = np.arange(len(src), dtype=float)
+                baseline = np.zeros_like(src)
+                ax.fill(
+                    np.concatenate([area_x, area_x[::-1]]),
+                    np.concatenate([src, baseline[::-1]]),
+                    alpha=0.5,
+                    color="#4477AA",
+                )
                 ax.set_xlabel("Indice"); ax.set_ylabel(ycol if y is not None else xcol)
 
             elif t == "Violin plot":
                 if h is not None:
-                    groups = [df.loc[df[hue]==v, xcol].dropna() for v in df[hue].unique()]
+                    hue_values = list(df[hue].dropna().unique())
+                    groups = [
+                        pd.to_numeric(df[xcol][df[hue] == v], errors="coerce").dropna().to_numpy(dtype=float)
+                        for v in hue_values
+                    ]
                     ax.violinplot(groups, showmedians=True)
-                    ax.set_xticks(range(1, len(df[hue].unique())+1))
-                    ax.set_xticklabels([str(v) for v in df[hue].unique()], rotation=30, ha="right")
+                    ax.set_xticks(range(1, len(hue_values)+1))
+                    ax.set_xticklabels([str(v) for v in hue_values], rotation=30, ha="right")
                 else:
-                    ax.violinplot(x.dropna(), showmedians=True)
+                    ax.violinplot(pd.to_numeric(x, errors="coerce").dropna().to_numpy(dtype=float), showmedians=True)
                 ax.set_ylabel(xcol)
 
             elif t == "Strip / Swarm plot":
-                vals = x.dropna()
+                vals = pd.to_numeric(x, errors="coerce").dropna().to_numpy(dtype=float)
                 ax.scatter(np.random.uniform(-0.2,0.2,len(vals)), vals,
                            alpha=0.4, s=15, color="#4477AA")
                 ax.set_xticks([]); ax.set_ylabel(xcol)
 
             elif t == "Bar chart orizzontale":
                 vc = x.value_counts(dropna=False).head(25)
-                ax.barh(range(len(vc)), vc.values, color="#4477AA", edgecolor="white")
+                ax.barh(range(len(vc)), vc.to_numpy(), color="#4477AA", edgecolor="white")
                 ax.set_yticks(range(len(vc)))
                 ax.set_yticklabels([str(v) for v in vc.index], fontsize=8)
                 ax.set_xlabel("Conteggio")
@@ -2730,25 +3854,27 @@ class MainWindow(QMainWindow):
                 sizes = (sizes-sizes.min())/(sizes.max()-sizes.min()+1e-9)*800+20
                 ax.scatter(pd.to_numeric(x,errors="coerce"),
                            pd.to_numeric(y,errors="coerce"),
-                           s=sizes, alpha=0.5, color="#4477AA")
+                           s=sizes.to_numpy(dtype=float), alpha=0.5, color="#4477AA")
                 ax.set_xlabel(xcol); ax.set_ylabel(ycol)
 
             elif t == "Heatmap (pivot aggregato)":
                 if y is None or hue == "(nessuna)":
                     QMessageBox.warning(self,"Selezione",
                         "Servono X, Y e Raggruppamento per la heatmap."); return
-                pivot = df.pivot_table(index=hue, columns=xcol, values=ycol, aggfunc=agg)
-                im = ax.imshow(pivot.values, cmap="YlOrRd", aspect="auto")
+                pivot = df.pivot_table(index=hue, columns=xcol, values=ycol, aggfunc=cast(Any, agg))
+                pivot_values = pivot.to_numpy(dtype=float)
+                im = ax.imshow(pivot_values, cmap="YlOrRd", aspect="auto")
                 ax.set_xticks(range(len(pivot.columns)))
-                ax.set_xticklabels(pivot.columns, rotation=45, ha="right", fontsize=7)
+                ax.set_xticklabels([str(v) for v in pivot.columns], rotation=45, ha="right", fontsize=7)
                 ax.set_yticks(range(len(pivot.index)))
-                ax.set_yticklabels(pivot.index, fontsize=7)
+                ax.set_yticklabels([str(v) for v in pivot.index], fontsize=7)
                 self.rpt_ch_fig.colorbar(im, ax=ax)
 
             elif t == "Pareto chart":
                 vc = x.value_counts(dropna=False).head(20)
-                cum_pct = vc.values.cumsum()/vc.values.sum()*100
-                ax.bar(range(len(vc)), vc.values, color="#4477AA", edgecolor="white")
+                vc_values = vc.to_numpy(dtype=float)
+                cum_pct = vc_values.cumsum()/vc_values.sum()*100
+                ax.bar(range(len(vc)), vc_values, color="#4477AA", edgecolor="white")
                 ax2 = ax.twinx()
                 ax2.plot(range(len(vc)), cum_pct, color="crimson", marker="o", ms=4, lw=1.5)
                 ax2.axhline(80, color="orange", ls="--", lw=1)
@@ -2760,8 +3886,8 @@ class MainWindow(QMainWindow):
             elif t == "Waterfall chart":
                 if y is None:
                     QMessageBox.warning(self,"Y","Seleziona colonna Y (valori delta)."); return
-                vals  = pd.to_numeric(y, errors="coerce").dropna().values[:20]
-                lbls  = x.dropna().astype(str).values[:20] if x is not None else [str(i) for i in range(len(vals))]
+                vals  = pd.to_numeric(y, errors="coerce").dropna().to_numpy(dtype=float)[:20]
+                lbls  = x.dropna().astype(str).to_numpy()[:20]
                 run = 0.0
                 for idx,(lbl,v) in enumerate(zip(lbls,vals)):
                     ax.bar(idx, v, bottom=run, color="#4CAF50" if v>=0 else "#F44336",
@@ -2906,7 +4032,7 @@ class MainWindow(QMainWindow):
     def _rpt_adv_update_desc(self, _=None) -> None:
         self.rpt_adv_desc.setText(self._ADV_DESCRIPTIONS.get(self.rpt_adv_type.currentText(),""))
 
-    def _rpt_adv_run(self) -> None:
+    def _rpt_adv_run(self) -> None:  # pyright: ignore[reportGeneralTypeIssues]
         df = self.working_df
         if df.empty:
             QMessageBox.warning(self,"Dati mancanti","Nessun dataset caricato."); return
@@ -2928,19 +4054,20 @@ class MainWindow(QMainWindow):
         try:
             if t == "Matrice di correlazione (heatmap)":
                 cols = num_cols[:16]; corr = df[cols].corr()
+                corr_values = corr.to_numpy(dtype=float)
                 ax = self.rpt_adv_fig.add_subplot(111)
-                im = ax.imshow(corr.values, cmap="RdBu_r", vmin=-1, vmax=1)
+                im = ax.imshow(corr_values, cmap="RdBu_r", vmin=-1, vmax=1)
                 n = len(cols)
                 ax.set_xticks(range(n)); ax.set_xticklabels(cols,rotation=45,ha="right",fontsize=7)
                 ax.set_yticks(range(n)); ax.set_yticklabels(cols,fontsize=7)
                 for i in range(n):
                     for j in range(n):
-                        ax.text(j,i,f"{corr.values[i,j]:.2f}",ha="center",va="center",fontsize=6)
+                        ax.text(j,i,f"{corr_values[i,j]:.2f}",ha="center",va="center",fontsize=6)
                 self.rpt_adv_fig.colorbar(im); ax.set_title("Matrice di correlazione (Pearson)")
                 result_lines.append("Top correlazioni (|r|≥0.7):")
                 for i,c1 in enumerate(cols):
                     for c2 in cols[i+1:]:
-                        v=corr.loc[c1,c2]
+                        v=float(corr.at[c1,c2])
                         if abs(v)>=0.7: result_lines.append(f"  {c1} ↔ {c2}: r={v:.4f}")
 
             elif t == "Scatter matrix (pair-plot)":
@@ -2978,7 +4105,7 @@ class MainWindow(QMainWindow):
             elif t == "Distribuzione di probabilità (fitting)":
                 from scipy import stats as sp
                 if xcol=="(nessuna)": QMessageBox.warning(self,"X","Seleziona X."); return
-                vals=pd.to_numeric(df[xcol],errors="coerce").dropna().values
+                vals=pd.to_numeric(df[xcol],errors="coerce").dropna().to_numpy(dtype=float)
                 dist_fn=getattr(sp,dist); params=dist_fn.fit(vals)
                 x_r=np.linspace(vals.min(),vals.max(),300)
                 ax=self.rpt_adv_fig.add_subplot(111)
@@ -2992,7 +4119,7 @@ class MainWindow(QMainWindow):
             elif t == "Q-Q plot (normalità)":
                 from scipy import stats as sp
                 if xcol=="(nessuna)": QMessageBox.warning(self,"X","Seleziona X."); return
-                vals=pd.to_numeric(df[xcol],errors="coerce").dropna().values
+                vals=pd.to_numeric(df[xcol],errors="coerce").dropna().to_numpy(dtype=float)
                 ax=self.rpt_adv_fig.add_subplot(111)
                 (osm,osr),(slope,intercept,r)=sp.probplot(vals,dist="norm")
                 ax.plot(osm,osr,"o",ms=4,alpha=0.5,color="#4477AA")
@@ -3004,7 +4131,7 @@ class MainWindow(QMainWindow):
             elif t == "Test di Shapiro-Wilk":
                 from scipy import stats as sp
                 if xcol=="(nessuna)": QMessageBox.warning(self,"X","Seleziona X."); return
-                vals=pd.to_numeric(df[xcol],errors="coerce").dropna().values[:5000]
+                vals=pd.to_numeric(df[xcol],errors="coerce").dropna().to_numpy(dtype=float)[:5000]
                 stat,p=sp.shapiro(vals)
                 ax=self.rpt_adv_fig.add_subplot(111)
                 ax.hist(vals,bins=30,density=True,alpha=0.6,color="#4477AA",edgecolor="white")
@@ -3026,7 +4153,8 @@ class MainWindow(QMainWindow):
                 g2=pd.to_numeric(df.loc[df[grp]==groups[1],xcol],errors="coerce").dropna()
                 stat,p=sp.mannwhitneyu(g1,g2,alternative="two-sided")
                 ax=self.rpt_adv_fig.add_subplot(111)
-                ax.boxplot([g1.values,g2.values],labels=[str(groups[0]),str(groups[1])],
+                ax.boxplot([g1.to_numpy(dtype=float),g2.to_numpy(dtype=float)],
+                           tick_labels=[str(groups[0]),str(groups[1])],
                            patch_artist=True,boxprops=dict(facecolor="#88AACC"),
                            medianprops=dict(color="crimson",lw=2))
                 ax.set_title(f"Mann-Whitney: {xcol} per {grp}"); ax.set_ylabel(xcol)
@@ -3040,11 +4168,11 @@ class MainWindow(QMainWindow):
                 if xcol=="(nessuna)" or grp=="(nessuna)":
                     QMessageBox.warning(self,"Selezione","Scegli X e Raggruppamento."); return
                 groups=df[grp].dropna().unique()
-                samples=[pd.to_numeric(df.loc[df[grp]==g,xcol],errors="coerce").dropna().values
+                samples=[pd.to_numeric(df.loc[df[grp]==g,xcol],errors="coerce").dropna().to_numpy(dtype=float)
                          for g in groups]
                 stat,p=sp.f_oneway(*samples)
                 ax=self.rpt_adv_fig.add_subplot(111)
-                ax.boxplot(samples,labels=[str(g) for g in groups],patch_artist=True)
+                ax.boxplot(samples,tick_labels=[str(g) for g in groups],patch_artist=True)
                 ax.set_xticklabels([str(g) for g in groups],rotation=30,ha="right")
                 ax.set_title(f"ANOVA: {xcol}~{grp}"); ax.set_ylabel(xcol)
                 result_lines+=[f"F={stat:.4f}  p={p:.6f}",
@@ -3057,13 +4185,14 @@ class MainWindow(QMainWindow):
                 ct=pd.crosstab(df[xcol],df[ycol])
                 chi2,p,dof,_=sp.chi2_contingency(ct)
                 ax=self.rpt_adv_fig.add_subplot(111)
-                im=ax.imshow(ct.values,cmap="Blues",aspect="auto")
+                ct_values = ct.to_numpy()
+                im=ax.imshow(ct_values,cmap="Blues",aspect="auto")
                 ax.set_xticks(range(len(ct.columns)))
-                ax.set_xticklabels(ct.columns,rotation=45,ha="right",fontsize=8)
-                ax.set_yticks(range(len(ct.index))); ax.set_yticklabels(ct.index,fontsize=8)
-                for i in range(ct.values.shape[0]):
-                    for j in range(ct.values.shape[1]):
-                        ax.text(j,i,str(ct.values[i,j]),ha="center",va="center",fontsize=8)
+                ax.set_xticklabels([str(v) for v in ct.columns],rotation=45,ha="right",fontsize=8)
+                ax.set_yticks(range(len(ct.index))); ax.set_yticklabels([str(v) for v in ct.index],fontsize=8)
+                for i in range(ct_values.shape[0]):
+                    for j in range(ct_values.shape[1]):
+                        ax.text(j,i,str(ct_values[i,j]),ha="center",va="center",fontsize=8)
                 self.rpt_adv_fig.colorbar(im)
                 ax.set_title(f"Contingenza {xcol}×{ycol}")
                 result_lines+=[f"χ²={chi2:.4f}  p={p:.6f}  dof={dof}",
@@ -3095,7 +4224,7 @@ class MainWindow(QMainWindow):
             elif t == "Distribuzione empirica CDF":
                 if xcol=="(nessuna)": QMessageBox.warning(self,"X","Seleziona X."); return
                 from scipy import stats as sp
-                vals=pd.to_numeric(df[xcol],errors="coerce").dropna().sort_values().values
+                vals=pd.to_numeric(df[xcol],errors="coerce").dropna().sort_values().to_numpy(dtype=float)
                 ecdf=np.arange(1,len(vals)+1)/len(vals)
                 dist_fn=getattr(sp,dist); params=dist_fn.fit(vals)
                 x_r=np.linspace(vals.min(),vals.max(),300)
@@ -3106,8 +4235,9 @@ class MainWindow(QMainWindow):
 
             elif t == "Outlier multivariati (Mahalanobis)":
                 cols_mv=num_cols[:10]; data=df[cols_mv].dropna()
-                mu=data.mean().values; cov=np.cov(data.values.T)
-                inv_cov=np.linalg.pinv(cov); diff=data.values-mu
+                data_values = data.to_numpy(dtype=float)
+                mu=data.mean().to_numpy(dtype=float); cov=np.cov(data_values.T)
+                inv_cov=np.linalg.pinv(cov); diff=data_values-mu
                 maha=np.sqrt(np.einsum("ij,jk,ik->i",diff,inv_cov,diff))
                 thr=np.percentile(maha,97.5); n_out=int((maha>thr).sum())
                 ax=self.rpt_adv_fig.add_subplot(111)
@@ -3119,7 +4249,7 @@ class MainWindow(QMainWindow):
 
             elif t == "Curva di Lorenz / Gini":
                 if xcol=="(nessuna)": QMessageBox.warning(self,"X","Seleziona X."); return
-                vals=pd.to_numeric(df[xcol],errors="coerce").dropna().sort_values().values
+                vals=pd.to_numeric(df[xcol],errors="coerce").dropna().sort_values().to_numpy(dtype=float)
                 vals=vals[vals>=0]
                 cum_v=np.cumsum(vals)/vals.sum(); cum_p=np.arange(1,len(vals)+1)/len(vals)
                 gini=1-2*np.trapz(cum_v,cum_p)
@@ -3133,7 +4263,7 @@ class MainWindow(QMainWindow):
             elif t == "Radar / Spider chart":
                 cols_r=[c for c in num_cols[:8]]
                 if len(cols_r)<3: QMessageBox.warning(self,"Variabili","Servono ≥3 numeriche."); return
-                means=df[cols_r].mean().values
+                means=df[cols_r].mean().to_numpy(dtype=float)
                 rng=means.max()-means.min()
                 vals_n=(means-means.min())/(rng+1e-9)
                 angles=np.linspace(0,2*np.pi,len(cols_r),endpoint=False).tolist()
@@ -3147,7 +4277,7 @@ class MainWindow(QMainWindow):
             elif t == "Funnel chart":
                 if xcol=="(nessuna)": QMessageBox.warning(self,"X","Seleziona X categorica."); return
                 vc=df[xcol].value_counts(dropna=False).head(10).sort_values(ascending=False)
-                labels=[str(v) for v in vc.index]; values=vc.values
+                labels=[str(v) for v in vc.index]; values=vc.to_numpy(dtype=float)
                 ax=self.rpt_adv_fig.add_subplot(111)
                 for i,(lbl,val) in enumerate(zip(labels,values)):
                     w=val/values[0]
@@ -3160,10 +4290,11 @@ class MainWindow(QMainWindow):
             elif t == "Pareto esteso (ABC)":
                 if xcol=="(nessuna)": QMessageBox.warning(self,"X","Seleziona X."); return
                 vc=df[xcol].value_counts(dropna=False).sort_values(ascending=False)
-                cum=vc.values.cumsum()/vc.values.sum()*100
+                vc_values = vc.to_numpy(dtype=float)
+                cum=vc_values.cumsum()/vc_values.sum()*100
                 colors=["#4CAF50" if c<=80 else "#FF9800" if c<=95 else "#F44336" for c in cum]
                 ax=self.rpt_adv_fig.add_subplot(111)
-                ax.bar(range(len(vc)),[v for v in vc.values],color=colors,edgecolor="white")
+                ax.bar(range(len(vc)),vc_values,color=colors,edgecolor="white")
                 ax2=ax.twinx()
                 ax2.plot(range(len(vc)),cum,color="#333",marker="o",ms=3,lw=1.5)
                 for thr,lbl in [(80,"A (80%)"),(95,"B (95%)")]:
@@ -3302,7 +4433,8 @@ class MainWindow(QMainWindow):
         window = self.rpt_fc_window.value()
         self.rpt_fc_fig.clear(); result_lines: List[str] = []
 
-        def _ser(col): return pd.to_numeric(df[col],errors="coerce").dropna().values
+        def _ser(col: str) -> np.ndarray:
+            return pd.to_numeric(df[col],errors="coerce").dropna().to_numpy(dtype=float)
 
         try:
             if t == "Regressione lineare semplice (con IC)":
@@ -3341,11 +4473,18 @@ class MainWindow(QMainWindow):
             elif t == "Media mobile (SMA/EMA)":
                 if ycol=="(nessuna)": QMessageBox.warning(self,"Y","Seleziona Y."); return
                 ys=pd.to_numeric(df[ycol],errors="coerce").dropna()
-                sma=ys.rolling(window).mean(); ema=ys.ewm(span=window,adjust=False).mean()
+                if ys.empty:
+                    QMessageBox.warning(self,"Dati non validi",f"La colonna «{ycol}» non contiene valori numerici."); return
+                effective_window = min(window, len(ys))
+                sma=ys.rolling(effective_window, min_periods=1).mean()
+                ema=ys.ewm(span=effective_window,adjust=False).mean()
                 ax=self.rpt_fc_fig.add_subplot(111)
-                ax.plot(ys.values,alpha=0.5,color="#4477AA",lw=1,label="Originale")
-                ax.plot(sma.values,color="crimson",lw=1.5,label=f"SMA({window})")
-                ax.plot(ema.values,color="#22AA44",lw=1.5,label=f"EMA({window})")
+                y_values=ys.to_numpy(dtype=float)
+                sma_values=sma.to_numpy(dtype=float)
+                ema_values=ema.to_numpy(dtype=float)
+                ax.plot(y_values,alpha=0.5,color="#4477AA",lw=1,label="Originale")
+                ax.plot(sma_values,color="crimson",lw=1.5,label=f"SMA({effective_window})")
+                ax.plot(ema_values,color="#22AA44",lw=1.5,label=f"EMA({effective_window})")
                 last=ema.iloc[-1]
                 ax.plot(range(len(ys),len(ys)+h),[last]*h,color="#22AA44",lw=1.5,ls="--")
                 ax.legend(fontsize=8); ax.set_title(f"SMA/EMA — {ycol}"); ax.grid(True,ls="--",lw=0.4)
@@ -3398,11 +4537,13 @@ class MainWindow(QMainWindow):
                 lo=np.percentile(bp,(1-ci_lvl)/2*100,axis=0)
                 hi=np.percentile(bp,(1+ci_lvl)/2*100,axis=0)
                 mid=np.percentile(bp,50,axis=0)
+                lo=np.asarray(lo,dtype=float); hi=np.asarray(hi,dtype=float)
+                mid=np.asarray(mid,dtype=float); xf=np.asarray(xf,dtype=float)
                 ax=self.rpt_fc_fig.add_subplot(111)
                 ax.plot(x,y,"o",ms=3,alpha=0.5,color="#4477AA",label="Storico")
                 ax.plot(x,np.polyval(c,x),color="#4477AA",lw=1.5)
                 ax.plot(xf,mid,color="crimson",lw=2,ls="--",label="Mediana Bootstrap")
-                ax.fill_between(xf,lo,hi,alpha=0.25,color="crimson",label=f"PI {int(ci_lvl*100)}%")
+                ax.fill_between(xf.tolist(),lo.tolist(),hi.tolist(),alpha=0.25,color="crimson",label=f"PI {int(ci_lvl*100)}%")
                 ax.axvline(len(y)-1,color="gray",ls=":",lw=1)
                 ax.legend(fontsize=8); ax.set_title(f"Bootstrap PI — {ycol}"); ax.grid(True,ls="--",lw=0.4)
                 result_lines+=[f"Sim={n_sim}",f"t+{h}: [{lo[-1]:.4g}, {hi[-1]:.4g}]"]
@@ -3536,7 +4677,7 @@ class MainWindow(QMainWindow):
                 for name,fig in self._report_figures.items():
                     safe="".join(c if c.isalnum() or c in " _-" else "_" for c in name)
                     for ext in ["png","svg"]:
-                        fig.savefig(Path(folder)/f"{safe}.{ext}",dpi=dpi,bbox_inches="tight")
+                        fig.savefig(str(Path(folder)/f"{safe}.{ext}"),dpi=dpi,bbox_inches="tight")
                 QMessageBox.information(self,"PNG/SVG",f"{len(self._report_figures)} grafici in:\n{folder}")
             except Exception as exc:
                 QMessageBox.critical(self,"Errore PNG",str(exc))
@@ -3551,10 +4692,66 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 QMessageBox.critical(self,"Errore CSV",str(exc))
 
-        elif fmt in {"odt","pptx"}:
-            QMessageBox.information(self,f"Export {fmt.upper()}",
-                f"Richiede python-{'docx' if fmt=='odt' else 'pptx'}.\n"
-                f"Installa con: pip install python-{'docx' if fmt=='odt' else 'pptx'}")
+        elif fmt == "pptx":
+            if not require_optional("python-pptx", reason="esportazione PowerPoint"):
+                return
+            path_p, _ = QFileDialog.getSaveFileName(
+                self, "Esporta PPTX", f"{title}.pptx", "PowerPoint (*.pptx)")
+            if not path_p: return
+            try:
+                import io as _io
+                pptx_module = importlib.import_module("pptx")
+                pptx_util = importlib.import_module("pptx.util")
+                Presentation = getattr(pptx_module, "Presentation")
+                Inches = getattr(pptx_util, "Inches")
+                prs = Presentation()
+                prs.slide_width  = Inches(13.33)
+                prs.slide_height = Inches(7.5)
+                sl0 = prs.slides.add_slide(prs.slide_layouts[0])
+                sl0.shapes.title.text = title
+                try: sl0.placeholders[1].text = author or ""
+                except Exception: pass
+                for fig_name, fig in self._report_figures.items():
+                    buf = _io.BytesIO()
+                    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+                    buf.seek(0)
+                    sl = prs.slides.add_slide(prs.slide_layouts[6])
+                    sl.shapes.add_picture(buf, Inches(0.3), Inches(0.6), width=Inches(12.5))
+                    txb = sl.shapes.add_textbox(Inches(0.3), Inches(0.1), Inches(12), Inches(0.4))
+                    txb.text_frame.text = fig_name
+                prs.save(path_p)
+                QMessageBox.information(self, "PPTX esportato", f"Salvato:\n{path_p}")
+            except Exception as exc:
+                QMessageBox.critical(self, "Errore PPTX", str(exc))
+        elif fmt == "odt":
+            if not require_optional("python-docx", reason="esportazione Word/ODT"):
+                return
+            path_o, _ = QFileDialog.getSaveFileName(
+                self, "Esporta Word", f"{title}.docx", "Word (*.docx)")
+            if not path_o: return
+            try:
+                import io as _io2
+                docx_module = importlib.import_module("docx")
+                docx_shared = importlib.import_module("docx.shared")
+                Document = getattr(docx_module, "Document")
+                Inches2 = getattr(docx_shared, "Inches")
+                doc = Document()
+                doc.add_heading(title, 0)
+                if author: doc.add_paragraph(f"Autore: {author}")
+                ov = self.rpt_ov_text.toPlainText()
+                if ov:
+                    doc.add_heading("Profilazione Dataset", 1)
+                    doc.add_paragraph(ov)
+                for fig_name, fig in self._report_figures.items():
+                    doc.add_heading(fig_name, 2)
+                    buf2 = _io2.BytesIO()
+                    fig.savefig(buf2, format="png", dpi=dpi, bbox_inches="tight")
+                    buf2.seek(0)
+                    doc.add_picture(buf2, width=Inches2(6))
+                doc.save(path_o)
+                QMessageBox.information(self, "Word esportato", f"Salvato:\n{path_o}")
+            except Exception as exc:
+                QMessageBox.critical(self, "Errore Word", str(exc))
 
 
         # ══════════════════════════════════════════════════════════════════════════
