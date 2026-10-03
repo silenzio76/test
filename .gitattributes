@@ -1,0 +1,2 @@
+reports/*.csv text eol=lf
+reports/*.json text eol=lf

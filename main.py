@@ -31,9 +31,12 @@ from dependency_manager import (
     is_installed,
 )
 import sys
+from pathlib import Path
+
+_PROJECT_DIR = Path(__file__).resolve().parent
 
 try:
-    ensure_dependencies_before_startup(markdown_path="LIBRARIES.md", auto_update=True)
+    ensure_dependencies_before_startup(markdown_path=str(_PROJECT_DIR / "LIBRARIES.md"), auto_update=True)
 except RuntimeError as e:
     print(f"\n❌ Errore fatale: {e}")
     sys.exit(1)
@@ -1016,7 +1019,16 @@ class MainWindow(QMainWindow):
 
         self.tabs.addTab(self._build_data_query_tab(), "📂  Data Query")
         self.tabs.addTab(self._build_report_tab(),        "📊  Report")
-        self.tabs.addTab(self._build_ml_placeholder(),    "🤖  Analisi ML")
+
+        from visit_tab import VisitTab
+        self.visit_tab = VisitTab(self._set_raw_df, self)
+        from healthcare_analysis_tab import HealthcareAnalysisTab
+        self.healthcare_tab = HealthcareAnalysisTab(self.visit_tab.store, self._set_raw_df, self)
+        self.tabs.addTab(self.healthcare_tab, 'Statistica sanitaria e ML')
+        visit_scroll = QScrollArea()
+        visit_scroll.setWidgetResizable(True)
+        visit_scroll.setWidget(self.visit_tab)
+        self.tabs.addTab(visit_scroll, "Visite sanitarie")
 
         self.status = QStatusBar()
         self.setStatusBar(self.status)

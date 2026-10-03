@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+data/
+*.sqlite3
+*.sqlite3-*
+*.tmp
+INTEGRATION_CHECKPOINT.md
+ANALYTICS_CHECKPOINT.md

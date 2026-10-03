@@ -78,6 +78,7 @@ _IMPORT_NAME_MAP: Dict[str, str] = {
     "python-docx":               "docx",
     "pyarrow":                   "pyarrow",
     "scikit-learn":              "sklearn",
+    "imbalanced-learn":          "imblearn",
     "statsmodels":               "statsmodels",
     "scipy":                     "scipy",
     "numpy":                     "numpy",
@@ -913,7 +914,9 @@ def open_optional_manager(parent=None) -> None:
     from PySide6.QtCore import Qt, QThread, Signal, QObject
     from PySide6.QtGui import QFont, QColor
 
-    optional_md = read_optional_libraries_from_markdown("LIBRARIES_OPTIONAL.md")
+    optional_md = read_optional_libraries_from_markdown(
+        str(Path(__file__).resolve().parent / "LIBRARIES_OPTIONAL.md")
+    )
     registry    = _load_optional_registry()
     py_exec     = get_python_executable()
 

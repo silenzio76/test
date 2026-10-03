@@ -1,0 +1,48 @@
+{
+  "datasets": [
+    {
+      "dataset_id": "6n7g-5p5e",
+      "title": "Georeferenziazione strutture",
+      "license": "CC0_10",
+      "source_url": "https://www.dati.lombardia.it/d/6n7g-5p5e",
+      "retrieved_at": "2026-10-03T13:32:12.981848+00:00",
+      "source_updated_at": "2018-03-08T09:52:08+00:00",
+      "grain": "struttura di ricovero",
+      "limits": "Anagrafica geografica storica; non censisce tutte le sedi ambulatoriali attuali. Nessun abbinamento automatico solo per nome.",
+      "source_rows": 212,
+      "downloaded_rows": 212,
+      "rows_sha256": "dbfb6e03485798cbc61f5409de878eb5cb43da8e39e8e37e9f1fee2671dd70d3"
+    },
+    {
+      "dataset_id": "qm4z-s92m",
+      "title": "Specialistica per Erogatore",
+      "license": "CC0_10",
+      "source_url": "https://www.dati.lombardia.it/d/qm4z-s92m",
+      "retrieved_at": "2026-10-03T13:25:45.546797+00:00",
+      "source_updated_at": "2026-03-23T13:05:06+00:00",
+      "grain": "anno × ATS × natura erogatore × branca × priorità",
+      "limits": "Solo produzione SSR aggregata; niente ALPI, prenotazioni individuali, no-show o tempi di attesa. Esclusi PS, screening e neuropsichiatria infantile secondo metadati.",
+      "source_rows": 804902,
+      "downloaded_rows": 22673,
+      "rows_sha256": "bb36be8b14bcc687453d8d4b5de4e9d0a83c22e1d928479bb9e9c3b6ffed4221"
+    },
+    {
+      "dataset_id": "hdbq-kes5",
+      "title": "Volumi Prestazioni Specialistica Ambulatoriale in Regione Lombardia",
+      "license": "CC0_10",
+      "source_url": "https://www.dati.lombardia.it/d/hdbq-kes5",
+      "retrieved_at": "2026-10-03T13:33:53.290392+00:00",
+      "source_updated_at": "2024-03-11T10:06:09+00:00",
+      "grain": "anno × ATS × tipologia erogatore × branca",
+      "limits": "Produzione storica, non capacità prenotabile. Sovrapposta temporalmente al dataset specialistica: non sommare i due dataset.",
+      "source_rows": 1566900,
+      "downloaded_rows": 7509,
+      "rows_sha256": "023991b81c123466bdcb2645c8ef4bc5eff84921557b8290d6973f474659b828"
+    }
+  ],
+  "report_sha256": {
+    "produzione_ats_annuale.csv": "dabf869fddf83d40458ea57ee57187cf6bbf72d2af01c7ca83a9752efaf0c3ec",
+    "produzione_branca_priorita_ultimo_anno.csv": "598d5e6b06926981be3339425226b3429a456347b70e0fb92278472e2e3fdcc6",
+    "produzione_regionale_annuale.csv": "a7076dfca402cab1cc4d82cfe8ae4daf036d7d9c14b9c248d88a2e366ca46fcd"
+  }
+}

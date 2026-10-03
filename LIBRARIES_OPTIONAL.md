@@ -50,3 +50,17 @@
 ## Export report
 # python-pptx          → Esporta grafici in PowerPoint (.pptx)
 # python-docx          → Esporta report in Word/ODT
+
+## Profilo scientifico condiviso con requirements CS 4407
+# seaborn              → Visualizzazione statistica
+# jupyterlab           → Notebook di esplorazione, separati dall'app desktop
+# torch                → PyTorch per modelli neurali da sviluppare su dati verificati
+# einops               → Trasformazioni di tensori
+# pandera              → Verifica dello schema dei flussi visite
+# yellowbrick          → Diagnostica di modelli scikit-learn
+# optuna               → Ricerca di iperparametri
+# shap                 → Interpretazione di modelli predittivi
+# tenacity             → Retry per integrazioni esterne future
+# lime                 → Spiegazioni locali di modelli
+# imbalanced-learn     → Apprendimento su classi sbilanciate
+# hypothesis           → Test generativi del workflow

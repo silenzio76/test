@@ -1,0 +1,19 @@
+# Profilo facoltativo tratto da CS 4407/requirements.txt il 3 ottobre 2026.
+# Include tutti i pacchetti allegati, senza imporli all'avvio della GUI.
+-r requirements.txt
+numpy
+pandas
+scikit-learn
+matplotlib
+seaborn
+jupyterlab
+torch
+einops
+pandera[pandas]
+yellowbrick
+optuna
+shap
+tenacity
+lime
+imbalanced-learn
+hypothesis

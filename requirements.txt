@@ -1,0 +1,11 @@
+# Dipendenze core già utilizzate dall'app desktop.
+PySide6
+pandas
+openpyxl
+pyarrow
+matplotlib
+numpy
+scipy
+scikit-learn
+statsmodels
+sqlalchemy
