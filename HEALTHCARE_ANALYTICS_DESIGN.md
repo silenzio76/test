@@ -1,6 +1,6 @@
 # Statistica e machine learning per la gestione sanitaria multisede
 
-Versione 1.2, 3 ottobre 2026. Ambito: prenotazione, stato ed esecuzione amministrativa della visita, statistica e supporto alla programmazione. Referti e rendicontazione contabile non fanno parte dell’implementazione richiesta. Roadmap estesa con importazione, colonne derivate, classificazione multidimensionale, corrispondenze anagrafiche, catalogo dei metodi analitici e reportistica.
+Versione 1.3, 3 ottobre 2026. Ambito: prenotazione, stato ed esecuzione amministrativa della visita, statistica e supporto alla programmazione. Referti e rendicontazione contabile non fanno parte dell’implementazione richiesta. Roadmap estesa con importazione, colonne derivate, classificazione multidimensionale, corrispondenze anagrafiche, catalogo dei metodi analitici, reportistica e manutenzione permanente a ogni release.
 
 ## Valutazione REV-077 e decisioni
 
@@ -181,6 +181,19 @@ Ordine proposto: statistica descrittiva e regressioni/baseline, alberi e ensembl
 - Export pianificati: CSV/Excel delle tabelle e HTML/PDF del report, con identico periodo e filtri, metadati e scheda del modello. Una scheda indica obiettivo, dati, unità, split, baseline, parametri, metriche, versione, spiegazioni e limiti d’impiego.
 
 **Stato distinto dal catalogo:** attualmente sono implementati gli indicatori descritti sopra e la pipeline Random Forest settimanale. Le altre famiglie, il selettore comparativo e gli export report aggiuntivi sono elementi di roadmap, non funzionalità già disponibili. Le librerie esistenti sono riusate dove sufficienti; non si aggiungono nuovi pacchetti con questa revisione documentale.
+
+## Attività permanenti a ogni release
+
+REV-077: accettati aggiornamento dell’interfaccia e rimozione di dipendenze/file inutili o inutilizzabili come impegni ricorrenti di rilascio. Rivista la rimozione indiscriminata: l’assenza di un import diretto non dimostra inutilità, e un file storico può documentare una fonte o una migrazione. I controlli seguenti rimangono attivi dopo il loro primo completamento e si ripetono per ogni release.
+
+| ID | Attività permanente | Controlli e criteri di completamento |
+|---|---|---|
+| R11 | Aggiornare e verificare l’interfaccia | Allineare schermate alle funzioni disponibili; verificare flussi visite/import/statistica/report/ML, leggibilità, navigazione, ridimensionamento, scorrimento, messaggi, stati vuoti e di errore. Correggere i problemi rilevati, mantenere terminologia coerente e distinguere dati osservati, scenari e risultati dei modelli. Registrare le modifiche e i controlli eseguiti |
+| R12 | Eliminare dipendenze e file inutili o inutilizzabili | Inventariare uso diretto, dinamico, opzionale e nei test; verificare compatibilità e installabilità con gli interpreti supportati. Rimuovere elementi confermati obsoleti o duplicati, correggere o sostituire quelli necessari ma inutilizzabili; mantenere sincronizzati requirements, cataloghi e documentazione. Conservare provenienza, migrazioni e dati necessari. Verificare avvio, import/export e test dopo ogni pulizia |
+
+La [checklist permanente di rilascio](RELEASE_CHECKLIST.md) è obbligatoria per ciascuna release. Ogni voce deve avere un esito e una verifica oppure una motivazione di non applicabilità; i blocchi di funzionalità prevista vanno risolti prima del rilascio. La verifica dell’interfaccia si ripete anche quando non cambia la grafica. Le dipendenze scientifiche richieste e usate da funzionalità opzionali o incrementi pianificati non si eliminano solo perché il core non le importa: se necessarie restano nel profilo opzionale con motivazione esplicita.
+
+Questo aggiornamento introduce la politica e i controlli documentali; non dichiara già eseguiti un redesign o una bonifica generale del repository.
 
 ## Riferimenti
 

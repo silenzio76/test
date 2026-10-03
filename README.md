@@ -64,6 +64,8 @@ Requisiti, formule, dizionario dei dati, fonti con pagine verificate e passi per
 
 Il catalogo della roadmap include regressioni, alberi decisionali, Random Forest, gradient boosting, reti neurali, K-Means e altri clustering, serie temporali, analisi delle anomalie, sopravvivenza e scenari di capacità, con criteri per report e confronto dei modelli. Attualmente è disponibile la pipeline Random Forest settimanale; gli altri metodi sono pianificati e saranno selezionati in base al problema e ai dati reali.
 
+Ogni release comprende revisione e aggiornamento dell’interfaccia e verifica di dipendenze/file obsoleti, duplicati o incompatibili. Queste attività restano permanenti nella roadmap R11–R12 e nella [checklist di rilascio](RELEASE_CHECKLIST.md); una rimozione richiede evidenza d’inutilità e verifiche delle funzioni coinvolte.
+
 ```text
 python lombardia_data.py
 python build_public_analysis.py
