@@ -3,9 +3,11 @@ HealthReport Studio
 Applicazione desktop per importazione, trasformazione e analisi dati.
 
 Struttura tab principale:
-  1. Data Query  → sorgenti file/DB, SQL editor, ETL
-  2. Report      → (futuro) report base e avanzati
-  3. Analisi ML  → (futuro) regressione e machine learning
+  Dati e trasformazioni → sorgenti file/DB, SQL editor, ETL
+  Import e anagrafiche  → staging geografico e corrispondenze
+  Visite sanitarie      → workflow amministrativo locale
+  Statistica e ML       → indicatori, produzione e domanda settimanale
+  Report               → analisi generiche ed esportazioni
 
 File richiesti nella stessa cartella:
     main.py
@@ -84,6 +86,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QGroupBox,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -815,8 +818,8 @@ class ETLEngine:
             num = pd.to_numeric(df[col], errors="coerce")
             q1, q3 = num.quantile(0.25), num.quantile(0.75)
             iqr = q3 - q1
-            df[col] = num.clip(lower=q1 - factor * iqr,
-                               upper=q3 + factor * iqr)
+            df[col] = num.clip(lower=float(q1 - factor * iqr),
+                               upper=float(q3 + factor * iqr))
         return df
 
     # ── UTILITÀ ───────────────────────────────────────────────────────────────
@@ -996,6 +999,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("HealthReport Studio")
         self.resize(1400, 900)
+        from workspace_ui import apply_workspace_style, heading
+        apply_workspace_style(self)
 
         # ── Stato condiviso ───────────────────────────────────────────────────
         self.raw_df: pd.DataFrame = pd.DataFrame()      # dati originali
@@ -1009,31 +1014,55 @@ class MainWindow(QMainWindow):
 
         # ── Layout radice ─────────────────────────────────────────────────────
         central = QWidget()
+        central.setObjectName('workspaceRoot')
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        root.setContentsMargins(16, 8, 16, 8)
+        root.setSpacing(6)
+        root.addWidget(heading('HealthReport Studio', 'Dati, attività sanitarie e analisi in un unico spazio di lavoro.'))
+        self.dataset_context = QLabel('Dataset di analisi: nessuno caricato. Scegli una fonte oppure invia una tabella ai Report.')
+        self.dataset_context.setObjectName('datasetContext')
+        self.dataset_context.setWordWrap(True)
+        root.addWidget(self.dataset_context)
 
         self.tabs = QTabWidget()
+        self.tabs.setObjectName('workspaceTabs')
         root.addWidget(self.tabs)
 
-        self.tabs.addTab(self._build_data_query_tab(), "📂  Data Query")
-        self.tabs.addTab(self._build_report_tab(),        "📊  Report")
+        self.data_tab = self._build_data_query_tab()
+        self.report_tab = self._build_report_tab()
 
         from visit_tab import VisitTab
-        self.visit_tab = VisitTab(self._set_raw_df, self)
+        self.visit_tab = VisitTab(self._publish_to_reports, self)
         from healthcare_analysis_tab import HealthcareAnalysisTab
-        self.healthcare_tab = HealthcareAnalysisTab(self.visit_tab.store, self._set_raw_df, self)
-        self.tabs.addTab(self.healthcare_tab, 'Statistica sanitaria e ML')
-        visit_scroll = QScrollArea()
-        visit_scroll.setWidgetResizable(True)
-        visit_scroll.setWidget(self.visit_tab)
-        self.tabs.addTab(visit_scroll, "Visite sanitarie")
+        self.healthcare_tab = HealthcareAnalysisTab(self.visit_tab.store, self._publish_to_reports, self)
+        from external_staging_tab import GeographyImportTab
+        self.import_tab = GeographyImportTab(self._publish_to_reports, self)
+        self.pages = {'data': self.data_tab, 'import': self.import_tab, 'visits': self.visit_tab,
+                      'analytics': self.healthcare_tab, 'report': self.report_tab}
+        # Legacy data/report panels have large minimum heights. Preserve every
+        # control while letting the workspace fit a small laptop window.
+        for key in ('data', 'report'):
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            scroll.setWidget(self.pages[key])
+            self.pages[key] = scroll
+        for key, caption in [('data', 'Dati e trasformazioni'), ('import', 'Import e anagrafiche'),
+                             ('visits', 'Visite sanitarie'), ('analytics', 'Statistica e ML'), ('report', 'Report')]:
+            self.tabs.addTab(self.pages[key], caption)
 
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self._set_status("Pronto.")
         self._build_menu_bar()
+
+    def navigate(self, page: str) -> None:
+        self.tabs.setCurrentWidget(self.pages[page])
+
+    def _publish_to_reports(self, df: pd.DataFrame, label: str) -> None:
+        self._set_raw_df(df, label)
+        self.navigate('report')
 
     def _build_menu_bar(self) -> None:
         """Barra menu principale con Strumenti → Gestione dipendenze opzionali."""
@@ -1290,7 +1319,8 @@ class MainWindow(QMainWindow):
         self.etl_steps.clear()
         self._src_refresh()
         self._etl_refresh()
-        name = Path(label).name if label else "—"
+        name = str(label) if label else "—"
+        self.dataset_context.setText(f'Dataset di analisi: {name} · {len(df):,} righe · {len(df.columns)} colonne')
         self._set_status(
             f"Dataset caricato — {len(df)} righe × {len(df.columns)} colonne"
             + (f"  da: {name}" if name else "")
@@ -3318,8 +3348,8 @@ class MainWindow(QMainWindow):
 
         # ── Header esportazione ──────────────────────────────────────────────
         exp_group = QGroupBox("Esportazione Report")
-        exp_layout = QHBoxLayout(exp_group)
-        exp_layout.setSpacing(6)
+        exp_layout = QGridLayout(exp_group)
+        exp_layout.setSpacing(8)
 
         self.rpt_title_edit = QLineEdit("HealthReport Studio – Report")
         self.rpt_title_edit.setPlaceholderText("Titolo documento…")
@@ -3335,30 +3365,23 @@ class MainWindow(QMainWindow):
         self.rpt_orient_combo = QComboBox()
         self.rpt_orient_combo.addItems(["Portrait","Landscape"])
 
-        for lbl, fmt, tip in [
-            ("📄 PDF",      "pdf",  "Tutti i grafici e tabelle in un unico PDF"),
-            ("📊 Excel",    "xlsx", "Tabelle statistiche in Excel"),
-            ("🌐 HTML",     "html", "Report completo come pagina HTML"),
-            ("📑 PPTX",     "pptx", "Ogni grafico come diapositiva PowerPoint"),
-            ("🖼 PNG/SVG",  "png",  "Ogni grafico come PNG + SVG ad alta risoluzione"),
-            ("📋 CSV",      "csv",  "Statistiche descrittive in CSV"),
-            ("📝 ODT",      "odt",  "Report in formato ODT (LibreOffice)"),
-        ]:
-            b = QPushButton(lbl)
-            b.setToolTip(tip)
-            b.clicked.connect(lambda _=False, f=fmt: self._rpt_export(f))
-            exp_layout.addWidget(b)
-
-        exp_layout.insertWidget(0, QLabel("Titolo:"))
-        exp_layout.insertWidget(1, self.rpt_title_edit)
-        exp_layout.insertWidget(2, QLabel("Autore:"))
-        exp_layout.insertWidget(3, self.rpt_author_edit)
-        exp_layout.insertWidget(4, QLabel("Carta:"))
-        exp_layout.insertWidget(5, self.rpt_paper_combo)
-        exp_layout.insertWidget(6, self.rpt_orient_combo)
-        exp_layout.insertWidget(7, self.rpt_dpi_spin)
-        exp_layout.insertWidget(8, _separator())
-        exp_layout.addStretch()
+        self.rpt_format_combo = QComboBox()
+        for caption, fmt in [('PDF', 'pdf'), ('Excel', 'xlsx'), ('HTML', 'html'),
+                             ('PowerPoint', 'pptx'), ('PNG e SVG', 'png'), ('CSV', 'csv'), ('ODT', 'odt')]:
+            self.rpt_format_combo.addItem(caption, fmt)
+        self.rpt_export_button = QPushButton('Esporta report')
+        self.rpt_export_button.setProperty('primary', True)
+        self.rpt_export_button.clicked.connect(lambda: self._rpt_export(self.rpt_format_combo.currentData()))
+        for column, (caption, field) in enumerate([('Titolo', self.rpt_title_edit), ('Autore', self.rpt_author_edit),
+                                                 ('Carta', self.rpt_paper_combo), ('Orientamento', self.rpt_orient_combo)]):
+            exp_layout.addWidget(QLabel(caption), 0, column)
+            exp_layout.addWidget(field, 1, column)
+        exp_layout.addWidget(self.rpt_dpi_spin, 1, 4)
+        exp_layout.addWidget(QLabel('Formato di esportazione'), 2, 0)
+        exp_layout.addWidget(self.rpt_format_combo, 2, 1)
+        exp_layout.addWidget(self.rpt_export_button, 2, 2, 1, 2)
+        exp_layout.setColumnStretch(0, 2)
+        exp_layout.setColumnStretch(1, 1)
 
         self.rpt_subtabs = QTabWidget()
         self.rpt_subtabs.addTab(self._build_rpt_overview_tab(),  "I · Panoramica Dataset")
@@ -4767,41 +4790,8 @@ class MainWindow(QMainWindow):
 
 
         # ══════════════════════════════════════════════════════════════════════════
-    # TAB 3 – ANALISI ML (placeholder)
+    # Utilità della finestra
     # ══════════════════════════════════════════════════════════════════════════
-
-    def _build_ml_placeholder(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        icon = QLabel("🤖")
-        icon.setFont(QFont("Arial", 48))
-        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        title = QLabel("Analisi ML — In sviluppo")
-        title.setFont(QFont("Arial", 18, QFont.Weight.Bold))
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        desc = QLabel(
-            "Questa sezione conterrà:\n\n"
-            "  •  Analisi di regressione  (lineare, multipla, polinomiale)\n"
-            "  •  Classificazione  (Logistic Regression, Decision Tree, Random Forest)\n"
-            "  •  Clustering  (K-Means, DBSCAN)\n"
-            "  •  Serie temporali  (ARIMA, Prophet)\n"
-            "  •  Valutazione modelli  (metriche, curve ROC, feature importance)\n\n"
-            "I dati proverranno dal dataset elaborato nella tab «Data Query»."
-        )
-        desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        desc.setWordWrap(True)
-        desc.setStyleSheet("color:#666; font-size:13px;")
-
-        layout.addWidget(icon)
-        layout.addSpacing(12)
-        layout.addWidget(title)
-        layout.addSpacing(8)
-        layout.addWidget(desc)
-        return widget
 
     # ══════════════════════════════════════════════════════════════════════════
     # Utilità

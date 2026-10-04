@@ -12,15 +12,17 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 with tempfile.TemporaryDirectory() as folder:
     os.environ["HEALTHREPORT_VISITS_DB"] = str(Path(folder) / "visits.sqlite3")
+    os.environ["HEALTHREPORT_STAGING_DB"] = str(Path(folder) / 'staging.sqlite3')
     os.environ["MPLCONFIGDIR"] = str(Path(folder) / "matplotlib")
     import dependency_manager
     with patch.object(dependency_manager, "ensure_dependencies_before_startup"):
         import main
     app = main.QApplication.instance() or main.QApplication([])
     window = main.MainWindow()
-    assert window.tabs.count() == 4
-    assert window.tabs.tabText(3) == "Visite sanitarie"
-    assert window.tabs.tabText(2) == 'Statistica sanitaria e ML'
+    assert window.tabs.count() == 5
+    assert window.tabs.tabText(window.tabs.indexOf(window.pages['visits'])) == "Visite sanitarie"
+    assert window.tabs.tabText(window.tabs.indexOf(window.pages['analytics'])) == 'Statistica e ML'
+    assert window.tabs.tabText(window.tabs.indexOf(window.pages['import'])) == 'Import e anagrafiche'
     from datetime import datetime, timedelta, timezone
     store = window.visit_tab.store
     store.book("SYNTHETIC-1", "Visita demo", "AMB-DEMO", datetime.now(timezone.utc) + timedelta(days=1), 20, "TEST")
@@ -46,4 +48,4 @@ with tempfile.TemporaryDirectory() as folder:
     assert 'pubb_priv' in window.healthcare_tab.frame.columns
     window.close()
     app.processEvents()
-    print("PASS: finestra reale, quattro schede, prenotazione, ETL/Report, indicatori e snapshot sintetico autonomo.")
+    print("PASS: finestra reale, cinque aree, prenotazione, ETL/Report, indicatori e snapshot sintetico autonomo.")

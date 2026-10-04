@@ -22,7 +22,15 @@ Gli stati finali non possono essere riaperti. Per riprogrammare, selezionare la 
 
 **Invia riepilogo ai Report** carica nel flusso Data Query/ETL/Report già esistente un conteggio per prestazione e stato, senza codici paziente. Il CSV completo delle prenotazioni è una funzione distinta. Le trasformazioni ETL dei riepiloghi non modificano il registro operativo.
 
-**Verifica qualità (Pandera)** controlla unicità degli ID, campi, stati, ordine degli orari e coerenza dell'esecuzione. pandas viene usato per dataset e aggregazioni; i grafici e le analisi del report originale rimangono disponibili. La scheda **Statistica sanitaria e ML** sostituisce la scheda ML dimostrativa: offre indicatori operativi stratificati, produzione regionale e validazione di previsioni della domanda. Nessun modello viene addestrato sui pazienti automaticamente.
+**Verifica qualità (Pandera)** controlla unicità degli ID, campi, stati, ordine degli orari e coerenza dell'esecuzione. pandas viene usato per dataset e aggregazioni; i grafici e le analisi del report originale rimangono disponibili. La scheda **Statistica e ML** offre indicatori operativi stratificati, produzione regionale e validazione di previsioni della domanda. Nessun modello viene addestrato sui pazienti automaticamente.
+
+## Spazio di lavoro — aggiornamento 4 ottobre 2026
+
+La navigazione distingue cinque aree: **Dati e trasformazioni**, **Import e anagrafiche**, **Visite sanitarie**, **Statistica e ML**, **Report**. La barra superiore mostra il dataset corrente e la sua numerosità. L'importazione geografica è una pagina persistente: cambiare area mantiene il lotto e l'anteprima. Nelle visite il modulo scorre a sinistra, mentre elenco e azioni restano a destra; la richiesta non verificata ha il campo data disabilitato. La statistica separa registro, produzione pubblica e domanda settimanale, con pubblicazione e previsioni abilitate solo quando disponibili. Errori o cambi di analisi invalidano la tabella precedente.
+
+**Invia ai Report** apre l'area Report e carica la tabella nel dataset analitico condiviso, sostituendo quello precedente e azzerando i passi ETL come già previsto dal flusso originale. I sette formati di esportazione sono raccolti in un selettore. Dati/Report e modulo visite hanno scorrimento per finestre piccole. Il modulo condiviso `workspace_ui.py` gestisce stile e intestazioni; `external_staging_tab.py` contiene l'importazione separata. Gli incrementi futuri vanno aggiunti all'area pertinente e registrati nella roadmap, senza mostrare comandi per funzioni ancora assenti.
+
+Rimossi ribbon scollegata, manifesto e icone inutilizzati, relativa documentazione e tre bytecode Python 3.13 tracciati. Eliminato il vecchio placeholder ML; il modulo dialog dell'importazione è sostituito dalla pagina dedicata. Nessuna dipendenza rimossa: gli usi dinamici e facoltativi sono ancora necessari. Controlli e limiti: [verifica R11/R12](reports/R11_R12_WORKSPACE_2026-10-04.md).
 
 ## Avvio
 
@@ -34,7 +42,7 @@ python -m venv .venv
 .venv\Scripts\python main.py
 ```
 
-Su Linux/macOS usare `.venv/bin/python`. Eseguire dalla cartella del sottoprogetto, come per l'app originale. Il database viene creato al primo avvio in `data/visits.sqlite3`; per usare un altro percorso impostare `HEALTHREPORT_VISITS_DB`. Il database e i nuovi artefatti temporanei sono esclusi da Git. I vecchi bytecode già presenti nel repository originale non vengono rimossi da questa integrazione.
+Su Linux/macOS usare `.venv/bin/python`. Eseguire dalla cartella del sottoprogetto, come per l'app originale. Il database viene creato al primo avvio in `data/visits.sqlite3`; per usare un altro percorso impostare `HEALTHREPORT_VISITS_DB`. Database e artefatti temporanei sono esclusi da Git; i tre bytecode Python 3.13 ereditati dall'originale sono stati rimossi nella pulizia del 4 ottobre.
 
 Per il profilo scientifico dell'allegato:
 
@@ -52,13 +60,41 @@ python -m unittest discover -s tests -v
 
 I test del dominio usano database temporanei e dati sintetici. Il test Pandera e i test generativi richiedono il profilo scientifico; il test UI usa PySide6 in modalità offscreen. Il registro contiene soltanto il workflow amministrativo: referti e rendicontazione sono fuori dalla richiesta confermata.
 
-## Limiti operativi
+## Importazione geografica in staging — R01/R03, primo incremento
+
+La scheda **Import e anagrafiche** contiene il flusso per lo snapshot JSON verificato `data/public/geografia.json` oppure un CSV con virgola dello stesso tracciato. Scegliere la fonte, controllare le sei colonne sorgente, premere **Verifica e anteprima**, poi **Conferma import in staging**. L'anteprima riconcilia righe valide e scartate; i codici duplicati sono tutti scartati, senza scegliere arbitrariamente il primo. Codici e CAP restano stringhe. Snapshot alterati vengono respinti.
+
+Il database separato `data/external_staging.sqlite3` (percorso alternativo: `HEALTHREPORT_STAGING_DB`) conserva lotti immutabili, righe originali, scarti/motivi, mapping, hash e provenienza. Reimportare lo stesso contenuto con gli stessi metadati e mapping restituisce il lotto esistente. Un file modificato crea una versione distinta: non aggiorna né cancella le visite. Per ritrovare un lotto, selezionare di nuovo la stessa fonte e confermare l'importazione idempotente.
+
+Per associare codici esterni a enti/presidi/sedi interni, compilare [geography_crosswalk.csv](templates/geography_crosswalk.csv) e caricarlo con **Carica corrispondenze revisionate CSV**. Tutte le colonne sono obbligatorie eccetto `valid_to`; `namespace` deve essere `lombardia:6n7g-5p5e:ricovero`, `status` deve essere `approved`. Usare date ISO `AAAA-MM-GG`, fonte e revisore espliciti. La validità è inclusiva; fine vuota significa validità senza fine dichiarata dal revisore. Un file non valido non inserisce alcuna associazione. Questo incremento registra dichiarazioni revisionate; non verifica autenticità del revisore o esistenza degli identificativi interni.
+
+**Verifica corrispondenze** applica codice esatto e periodo alla data scelta. Nessun candidato produce `unmapped`, uno `mapped`, più candidati `ambiguous`, con alternative visibili nel report. La copertura usa come denominatore le sole righe valide del lotto. **Invia tabella e provenienza ai Report** pubblica l'intera tabella verificata, con hash della fonte, lotto, aggiornamento, limiti e dettagli delle associazioni; la vista è limitata a 1.000 righe.
+
+Verifica sullo snapshot locale storico: 212 righe valide, zero scartate, reimportazione senza duplicati. Nessuna corrispondenza interna inventata: 212 non associate. Fonte aggiornata nel 2018, inadatta a certificare sedi attuali. R01/R03 restano aperti per CUP, Excel/DB/API con staging, altri tracciati e anagrafiche, aggiornamenti incrementali per record, revisione/revoca delle corrispondenze e autenticazione. Non addestrare modelli di domanda/no-show su questa anagrafica.
+
+## Limiti operativi del registro visite
 
 Questa integrazione è una base desktop locale. Il campo operatore è dichiarativo; non fornisce autenticazione, autorizzazioni né un audit resistente a manomissioni del file SQLite. Prima dell'impiego condiviso con dati reali servono controllo degli accessi, backup e una decisione sull'architettura del servizio. Non sono ancora implementati collegamenti a CUP esterni, notifiche o importazione dei loro flussi: occorrono formati e interfacce effettivi.
 
 Repository upstream: [silenzio76/test](https://github.com/silenzio76/test). Il rapporto storico in `lavoro/archive` è la base dei requisiti statistici, con aggiornamenti regionali distinti e versionati nel documento di progettazione. L’archivio documentale è esterno al repository: i collegamenti relativi verso `../../archive` funzionano nel workspace di lavoro; per il rapporto principale è disponibile anche il collegamento al PDF istituzionale.
 
 ## Statistica, dati regionali e machine learning
+
+### R02 — derivazioni annuali SSR disponibili
+
+Nella pagina **Statistica e ML**, selezionare **Derivazioni annuali SSR** e premere **Genera e verifica colonne**. Lo snapshot locale verificato `data/public/specialistica.json` produce una tabella anno × codice ATS × natura dell'erogatore. Sono conservati codici testuali e natura pubblica/privata, distinta dal regime SSN/ALPI. Le descrizioni ATS non sono chiavi: un cambio di nome non interrompe la stessa coorte; descrizioni multiple sono segnalate.
+
+Le colonne comprendono anno/volume precedente disponibile, anni mancanti fra osservazioni, variazione assoluta e percentuale solo fra anni consecutivi, quota di produzione con priorità non indicata, stato del confronto, versione e hash della fonte. Una base zero lascia nulla la percentuale; anni mancanti non vengono creati o imputati. La riconciliazione per anno conserva sia volumi sia conteggi `source_rows`, senza certificare completezza del periodo o confrontabilità delle codifiche.
+
+La scheda **Regole e unità** mostra formula, colonne sorgente, unità, regola sui nulli e versione. **Esporta dati e regole** crea una cartella verificata con `source.json` (snapshot originale completo), `annual.csv`, `recipe.json` e `manifest.json`. La preparazione avviene in una cartella temporanea sorella e diventa visibile con un'unica rinomina atomica. Ripetere l'export verifica il pacchetto esistente; un pacchetto alterato viene respinto senza sovrascrittura. **Invia tabella ai Report** usa il flusso analitico esistente; per mantenere insieme tutti i metadati e la fonte completa usare l'export dedicato.
+
+Da terminale, senza scaricare nuove fonti:
+
+```text
+python public_derivations.py
+```
+
+Percorsi alternativi: `--source percorso_snapshot.json --output cartella`. Il pacchetto locale predefinito è sotto `data/derived`, escluso da Git. Verifica reale: 22.673 aggregati → 161 righe annuali, 804.902 righe sorgente riconciliate, anni 2016–2025. R02 è completato solo per questa ricetta fissa: editor di formule, altre granularità, join interni e altre fonti restano pianificati. Nessuna serie CUP, settimana sintetica o etichetta no-show ricavata dai volumi. [Esiti e limiti R02](reports/R02_ANNUAL_DERIVATIONS_2026-10-04.md).
 
 Requisiti, formule, dizionario dei dati, fonti con pagine verificate e passi per la struttura multisede: [HEALTHCARE_ANALYTICS_DESIGN.md](HEALTHCARE_ANALYTICS_DESIGN.md). Risultati dell’estrazione pubblica: [LOMBARDIA_DATA_REPORT.md](reports/LOMBARDIA_DATA_REPORT.md).
 

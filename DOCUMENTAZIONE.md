@@ -4,6 +4,8 @@
 **Data:** Maggio 2026  
 **Tecnologia:** Python 3.10+ · PySide6 · pandas · SQLAlchemy · matplotlib
 
+**Aggiornamento interfaccia 4 ottobre 2026:** cinque aree distinte (Dati e trasformazioni, Import e anagrafiche, Visite sanitarie, Statistica e ML, Report), navigazione semantica mediante `MainWindow.navigate`, stile/intestazioni in `workspace_ui.py`, importazione persistente in `external_staging_tab.py`. Le sezioni generiche descrivono il nucleo originale; per flussi sanitari, staging, limiti e verifiche correnti usare [README.md](README.md) e [HEALTHCARE_ANALYTICS_DESIGN.md](HEALTHCARE_ANALYTICS_DESIGN.md). Ribbon e risorse scollegate sono state rimosse; non sono moduli da reintegrare. Nessuna nuova dipendenza.
+
 ---
 
 ## Indice
@@ -437,12 +439,14 @@ main.py (4785 righe, 233 KB)
 │   │   ├── C · Cloud Database
 │   │   ├── D · Editor SQL
 │   │   └── E · ETL / Trasformazioni
-│   ├── Tab 2: Report
+│   ├── Tab 2: Import e anagrafiche (GeographyImportTab)
+│   ├── Tab 3: Visite sanitarie (VisitTab)
+│   ├── Tab 4: Statistica e ML (HealthcareAnalysisTab)
+│   └── Tab 5: Report
 │   │   ├── I   · Panoramica Dataset
 │   │   ├── II  · Grafici Base
 │   │   ├── III · Statistiche Avanzate
 │   │   └── IV  · Previsioni & Probabilità
-│   └── Tab 3: Analisi ML (placeholder)
 │
 └── main()   (entry point)
 ```
@@ -948,12 +952,7 @@ orizzonte temporale, grado polinomiale, livello IC, n° simulazioni, finestra MA
 
 ## 9. MainWindow — Tab Analisi ML
 
-Placeholder per sviluppi futuri. Previsto:
-- Regressione lineare/multipla/polinomiale
-- Classificazione (Logistic Regression, Decision Tree, Random Forest)
-- Clustering (K-Means, DBSCAN)
-- Serie temporali (ARIMA, Prophet)
-- Valutazione modelli (ROC, feature importance, metriche)
+Il vecchio placeholder è stato eliminato. La pagina Statistica e ML usa `healthcare_analysis_tab.py`: selettore registro visite, produzione SSR annuale o domanda settimanale CSV. Sono disponibili gli indicatori sanitari e Random Forest con validazione cronologica e baseline, solo su serie che soddisfano il contratto dati. Risultati invalidati dopo errori o cambio di selezione; previsioni e pubblicazione abilitate quando disponibili. Le altre famiglie di modelli restano nel catalogo pianificato di `HEALTHCARE_ANALYTICS_DESIGN.md`.
 
 ---
 

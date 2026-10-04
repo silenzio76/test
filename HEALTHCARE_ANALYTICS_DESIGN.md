@@ -133,7 +133,23 @@ Per R03, il matching esatto usa prima identificativi verificati e periodo di val
 
 Per R02, le variabili vengono generate alla grana del dato disponibile: una riga annuale non acquisisce date di appuntamento individuali tramite una formula. L’export conserva insieme dati originali, derivazioni e metadati; la pipeline di training registra quali colonne sono disponibili all’istante della decisione. Le colonne mancanti comportano un requisito non soddisfatto, non una stima presentata come osservazione.
 
-Il prossimo incremento resta R01/R03 su un solo tracciato reale, con mapping e verifiche; R02 e R04 seguono su quella base. R05 è un modulo di scenari distinto. R06 richiede serie temporali ed esiti reali e non modifica il requisito già stabilito per la pipeline disponibile.
+Aggiornamento autorizzato il 4 ottobre 2026: in assenza della possibilità di acquisire l'estratto CUP, proseguire con la parte R02 applicabile agli snapshot pubblici annuali già verificati. R01/R03 restano parziali e i join interni di R02/R04 richiedono corrispondenze revisionate. R05 è un modulo di scenari distinto. R06 richiede serie temporali ed esiti reali e non modifica il requisito già stabilito per la pipeline disponibile.
+
+### R02 annuale applicato — 4 ottobre 2026
+
+REV-077: accettata la prosecuzione senza estratto aziendale per le sole derivazioni della produzione pubblica; esclusa l'inferenza di richieste settimanali o assenze. Implementata la ricetta `annual-production/1.0` su `qm4z-s92m`: aggregazione anno × codice ATS × natura erogatore, lag annuali per coorte, anni mancanti espliciti, variazioni fra anni consecutivi e denominatore positivo per la percentuale, quota di priorità non indicata. Codici preservati come stringhe; denominazioni multiple segnalate senza assumere nuove identità. Non eseguiti join con enti/presidi/sedi interni.
+
+La GUI offre anteprima, regole/unità e export dedicato. La ricetta conserva formule, colonne sorgente, unità, nulli e versione; l'export conserva snapshot originale, tabella annuale, ricetta e manifest con hash in una directory preparata/validata prima della rinomina atomica. Pacchetti esistenti verificati senza sovrascrittura; fallimenti non alterano pacchetti precedenti. Ogni anno riconcilia volumi e `source_rows`. `coverage_status=unverified` distingue la riconciliazione aritmetica dalla completezza annuale e dalla comparabilità delle codifiche.
+
+Verifica reale: 22.673 righe aggregate → 161 righe annuali, 804.902 righe sorgente, anni 2016–2025; 144 confronti consecutivi e 17 prime osservazioni. Test dedicati coprono anche buchi annuali e base zero, assenti nei confronti di questo snapshot. R02 resta parziale rispetto alla roadmap generale: mancano editor configurabile, ricodifiche ulteriori, altre fonti/grane e join anagrafici. Nessuna nuova dipendenza. Il prossimo incremento può estendere report descrittivi R10 sugli indicatori pubblici già verificati oppure ricette R02 su un altro dataset omogeneo; non chiudere R03/R04/R06 senza dati adeguati.
+
+### Incremento applicato — 4 ottobre 2026
+
+R01/R03 **parzialmente implementati**, senza chiudere le voci complessive: staging dell'anagrafica geografica reale `6n7g-5p5e` già archiviata (212 strutture, aggiornamento fonte 8 marzo 2018). REV-077 accetta questo tracciato pubblico come primo incremento verificabile; resta distinta l'acquisizione CUP necessaria per gli indicatori delle richieste e per R06. Nessuna equivalenza automatica fra struttura di ricovero, ente, presidio e sede ambulatoriale attuale.
+
+Implementati scelta snapshot JSON/CSV, mapping esplicito delle colonne, anteprima, validazione senza conversioni numeriche dei codici, scarti riconciliati, lotti immutabili e import ripetuto idempotente in SQLite separato. Il matching usa un CSV di corrispondenze dichiarate approvate, namespace/codice esatto e date di validità inclusive, fonte e revisore; più candidati attivi restano ambigui. Report con percentuale mappata, non mappati e ambigui, hash, periodo, provenienza e alternative. Nessuna scrittura nel registro operativo.
+
+Verifica reale: 212 valide + 0 scartate = 212 righe fonte; secondo import dello stesso lotto senza inserimento; 212 non mappate in assenza di corrispondenze approvate. Limiti aperti: autenticazione del revisore, verifica dell'anagrafica interna, revoche/correzioni delle associazioni, altre entità e tracciati, Excel/DB/API in staging, aggiornamento incrementale per record. R02/R04 seguono una corrispondenza interna effettivamente revisionata; i metodi R06–R09 rimangono subordinati ai dati adeguati.
 
 ## Roadmap dei metodi di analisi e della reportistica
 

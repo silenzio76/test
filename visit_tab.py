@@ -7,7 +7,7 @@ from PySide6.QtCore import QDateTime, Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QSpinBox,
     QDateTimeEdit, QPushButton, QTableWidget, QTableWidgetItem, QComboBox,
-    QMessageBox, QHeaderView, QLabel, QFileDialog,
+    QMessageBox, QHeaderView, QLabel, QFileDialog, QSplitter, QScrollArea, QGroupBox, QGridLayout,
 )
 from visit_workflow import VisitStore, TRANSITIONS, STATES, ENUMS
 
@@ -18,9 +18,20 @@ class VisitTab(QWidget):
         self.publish_dataset = publish_dataset
         path = Path(os.environ.get("HEALTHREPORT_VISITS_DB", str(Path(__file__).parent / "data" / "visits.sqlite3")))
         self.store = store or VisitStore(path)
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Prenotazione → conferma → accettazione → esecuzione. Identificare il paziente con un codice."))
-        form = QFormLayout()
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+        from workspace_ui import heading
+        root.addWidget(heading('Visite sanitarie',
+            'Compila una prenotazione a sinistra. Seleziona una visita nell’elenco per registrarne lo stato o riprogrammarla.'))
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        editor_scroll = QScrollArea()
+        editor_scroll.setWidgetResizable(True)
+        editor = QWidget()
+        editor_layout = QVBoxLayout(editor)
+        appointment = QGroupBox('Prenotazione')
+        form = QFormLayout(appointment)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         self.patient = QLineEdit()
         self.service = QLineEdit()
         self.resource = QLineEdit()
@@ -36,8 +47,10 @@ class VisitTab(QWidget):
                              ("Risorsa / ambulatorio", self.resource), ("Operatore", self.actor),
                              ("Appuntamento (ora locale)", self.starts), ("Durata", self.duration)]:
             form.addRow(label, field)
-        layout.addLayout(form)
-        context_form = QFormLayout()
+        editor_layout.addWidget(appointment)
+        context_group = QGroupBox('Contesto e richiesta')
+        context_form = QFormLayout(context_group)
+        context_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         self.context = {}
         for name, caption in [('organisation', 'Struttura / ente'), ('site', 'Sede'), ('clinician', 'Codice professionista condiviso fra sedi')]:
             self.context[name] = QLineEdit()
@@ -54,46 +67,68 @@ class VisitTab(QWidget):
         from PySide6.QtWidgets import QCheckBox
         self.request_known = QCheckBox('Data della richiesta verificata')
         self.request_known.setChecked(False)
+        self.requested.setEnabled(False)
+        self.request_known.toggled.connect(self.requested.setEnabled)
         context_form.addRow(self.request_known, self.requested)
-        layout.addLayout(context_form)
+        editor_layout.addWidget(context_group)
+        self.book_button = QPushButton('Prenota visita')
+        self.book_button.setProperty('primary', True)
+        self.book_button.clicked.connect(self.book)
+        editor_layout.addWidget(self.book_button)
+        editor_layout.addStretch()
+        editor_scroll.setWidget(editor)
+        worklist = QWidget()
+        layout = QVBoxLayout(worklist)
+        layout.setContentsMargins(12, 0, 0, 0)
         actions = QHBoxLayout()
         self.filter = QComboBox()
         self.filter.addItems(["Tutti"] + list(STATES))
         self.filter.currentTextChanged.connect(self.refresh)
         self.target = QComboBox()
+        actions.addWidget(QLabel('Stato delle visite'))
         actions.addWidget(self.filter)
-        for caption, callback in [("Prenota", self.book), ("Aggiorna", self.refresh)]:
-            button = QPushButton(caption)
-            button.clicked.connect(callback)
-            actions.addWidget(button)
+        refresh_button = QPushButton('Aggiorna elenco')
+        refresh_button.clicked.connect(self.refresh)
+        actions.addWidget(refresh_button)
+        layout.addLayout(actions)
+        actions = QHBoxLayout()
         actions.addWidget(self.target)
         self.change = QPushButton("Registra stato")
         self.change.clicked.connect(self.change_status)
         actions.addWidget(self.change)
-        button = QPushButton("Riprogramma con data e durata del modulo")
-        button.clicked.connect(self.reschedule)
-        actions.addWidget(button)
+        self.reschedule_button = QPushButton('Riprogramma selezionata')
+        self.reschedule_button.setToolTip('Usa la data e la durata impostate nel modulo a sinistra.')
+        self.reschedule_button.clicked.connect(self.reschedule)
+        actions.addWidget(self.reschedule_button)
         layout.addLayout(actions)
         self.table = QTableWidget(0, 10)
         self.table.setHorizontalHeaderLabels(["ID", "Paziente", "Prestazione", "Risorsa", "Appuntamento", "Stato", "Eseguita il", 'Ente', 'Sede', 'Regime'])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.itemSelectionChanged.connect(self.selection_changed)
         layout.addWidget(self.table)
         self.summary = QLabel()
+        self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
-        reports = QHBoxLayout()
-        for caption, callback in [("Storico selezionata", self.history),
+        reports = QGridLayout()
+        for index, (caption, callback) in enumerate([("Storico selezionata", self.history),
                                   ("Invia riepilogo ai Report", self.publish),
                                   ("Esporta prenotazioni CSV", self.export),
-                                  ("Verifica qualità (Pandera)", self.validate)]:
+                                  ("Verifica qualità (Pandera)", self.validate)]):
             button = QPushButton(caption)
             button.clicked.connect(callback)
-            reports.addWidget(button)
+            reports.addWidget(button, index // 2, index % 2)
         layout.addLayout(reports)
+        splitter.addWidget(editor_scroll)
+        splitter.addWidget(worklist)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([350, 900])
+        root.addWidget(splitter, 1)
         self.refresh()
 
     def selected(self):
@@ -109,6 +144,10 @@ class VisitTab(QWidget):
         except ValueError:
             pass
         self.change.setEnabled(self.target.count() > 0)
+        try:
+            self.reschedule_button.setEnabled(self.selected()['status'] in ('prenotata', 'confermata'))
+        except ValueError:
+            self.reschedule_button.setEnabled(False)
 
     def refresh(self, *_):
         try:
